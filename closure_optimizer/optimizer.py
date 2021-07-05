@@ -1,5 +1,6 @@
 import ast
 import contextlib
+import copy
 import functools
 import sys
 from typing import (
@@ -213,7 +214,7 @@ class Optimizer(ast.NodeTransformer):
             yield from self._visit_and_flatten(
                 [ast.Assign(targets=[node.target], value=self._cache(elt))]
             )
-            yield from self._visit_and_flatten(node.body)
+            yield from self._visit_and_flatten(copy.deepcopy(node.body))
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> NodeTransformation:
         if not self._main_function:

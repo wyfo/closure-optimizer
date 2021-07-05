@@ -9,7 +9,7 @@ from closure_optimizer.constants import OPTIMIZED_AST_ATTR
 T = TypeVar("T")
 
 
-def get_function_ast(obj: Callable) -> ast.AST:
+def get_function_ast(obj: Callable) -> ast.FunctionDef:
     if obj.__name__ == "<lambda>":
         raise ValueError("Lambda are not supported")
     if hasattr(obj, OPTIMIZED_AST_ATTR):

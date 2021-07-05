@@ -1,7 +1,8 @@
+# flake8: noqa
 import functools
 
 from closure_optimizer import optimize
-from tests.utils import assert_optimized, compare_func_body
+from tests.utils import assert_optimized
 
 
 def test_evaluate_constants():
@@ -130,3 +131,19 @@ def test_if_expr():
     assert_optimized(f, f, True)
     assert_optimized(functools.partial(f, True), g)
     assert_optimized(functools.partial(f, False), h)
+
+
+def test_for_loop():
+    l = [0, 1]
+
+    def f():
+        for i in l:
+            eval(str(i))
+
+    def g():
+        i = 0
+        eval("0")
+        i = 1
+        eval("1")
+
+    assert_optimized(f, g)
