@@ -21,10 +21,23 @@ from tests.utils import compare_func_body
     ],
 )
 def test_map_parameters(args, kwargs, partial, expected):
-    def func_param(__a, b, *c, d, **e):
+    def func(__a, b, *c, d, **e):
         ...
 
-    assert map_parameters(func_param, args, kwargs, partial=partial) == expected
+    assert map_parameters(func, args, kwargs, partial=partial) == expected
+
+
+@pytest.mark.parametrize(
+    "args, kwargs, a, b", [((), {}, 0, 1), ((2,), {}, 2, 1), ((), {"b": 2}, 0, 2)]
+)
+def test_map_parameters_default(args, kwargs, a, b):
+    def func(a=0, b=1):
+        ...
+
+    assert map_parameters(func, args, kwargs) == dict(a=a, b=b)
+    # assert map_parameters(func, (), {}) == {"a": 0, "b": 1}
+    # assert map_parameters(func, (2,), {}) == {"a": 2, "b": 1}
+    # assert map_parameters(func, (), {"b": 2}) == {"a": 0, "b": 2}
 
 
 def func1(a, b):

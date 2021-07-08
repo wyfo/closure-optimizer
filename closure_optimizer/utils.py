@@ -49,39 +49,28 @@ def map_parameters(
         return {}
     offset = 0
     kwargs = dict(kwargs)
-    parameters = iter(inspect.signature(func).parameters.values())
     result: Dict[str, Any] = {}
-    while offset < len(args):
-        for param in parameters:
-            if param.kind in {
-                inspect.Parameter.KEYWORD_ONLY,
-                inspect.Parameter.VAR_KEYWORD,
-            }:
-                raise NotImplementedError
-            elif param.kind == inspect.Parameter.VAR_POSITIONAL:
-                if not partial:
-                    result[param.name] = tuple(args[offset:])
-                offset = len(args)
-                break
-            else:
-                result[param.name] = args[offset]
-                offset += 1
-    while kwargs:
-        for param in parameters:
-            if param.kind == inspect.Parameter.POSITIONAL_ONLY:
-                continue
-            elif param.kind == inspect.Parameter.VAR_POSITIONAL:
-                raise NotImplementedError
-            elif param.kind == inspect.Parameter.VAR_KEYWORD:
-                if not partial:
-                    result[param.name] = kwargs
-                return result
-            elif partial and param.name not in kwargs:
-                pass
-            else:
-                result[param.name] = kwargs.pop(param.name)
-        else:  # Unexpected kwargs
-            raise NotImplementedError
+    for param in inspect.signature(func).parameters.values():
+        if param.kind == inspect.Parameter.VAR_POSITIONAL:
+            if not partial:
+                result[param.name] = tuple(args[offset:])
+            offset = len(args)
+        elif param.kind == inspect.Parameter.VAR_KEYWORD:
+            if not partial:
+                result[param.name] = kwargs
+            assert offset == len(args)
+            return result
+        elif offset < len(args) and param.kind != inspect.Parameter.KEYWORD_ONLY:
+            result[param.name] = args[offset]
+            offset += 1
+        elif param.name in kwargs and param.kind != inspect.Parameter.POSITIONAL_ONLY:
+            result[param.name] = kwargs.pop(param.name)
+        elif partial:
+            pass
+        else:
+            assert param.default is not inspect.Parameter.empty
+            result[param.name] = param.default
+    assert offset == len(args) and not kwargs
     return result
 
 
@@ -152,3 +141,20 @@ else:
     )
 
 NodeTransformation = Union[ast.AST, Iterable[ast.AST], None]
+
+
+class Renamer(ast.NodeVisitor):
+    def __init__(self, generate_name: Callable[[], str]):
+        self.generate_name = generate_name
+        self._mapping: Dict[str, str] = {}
+
+    def visit_Name(self, node: ast.Name):
+        if node.id not in self._mapping:
+            self._mapping[node.id] = self.generate_name()
+        node.id = self._mapping[node.id]
+
+
+def rename(node: ast.AST, generate_name: Callable[[], str]) -> Mapping[str, str]:
+    renamer = Renamer(generate_name)
+    renamer.visit(node)
+    return renamer._mapping
