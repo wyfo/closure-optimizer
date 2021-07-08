@@ -147,3 +147,19 @@ def test_for_loop():
         eval("1")
 
     assert_optimized(f, g)
+
+
+def test_comprehension():
+    def f():
+        return (
+            [i for i in (0, 1)],
+            {(i, j) for i, j in [(0, 1), (0, 2)]},
+            {i: i + 1 for i in (0, 1) if i != 0},
+        )
+
+    _1 = [0, 1], {(0, 1), (0, 2)}, {1: 2}
+
+    def g():
+        return _1
+
+    assert_optimized(f, g)

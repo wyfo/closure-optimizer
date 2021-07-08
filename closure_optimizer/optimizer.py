@@ -1,14 +1,16 @@
 import ast
-import contextlib
 import copy
 import functools
+import itertools
 import sys
+import typing
 from typing import (
     Any,
     Callable,
     Collection,
     Dict,
     Iterable,
+    Iterator,
     List,
     Mapping,
     Optional,
@@ -50,6 +52,9 @@ class IsCached:
 
 Undefined = object()
 
+Node = TypeVar("Node", bound=ast.AST)
+T = TypeVar("T")
+
 
 class Optimizer(ast.NodeTransformer):
     def __init__(
@@ -61,12 +66,13 @@ class Optimizer(ast.NodeTransformer):
     ):
         self.inline = inline
         self._captured = captured
-        self._skipped = set(skip)
+        self.skipped = set(skip)
         self._counter = 0
         self._cached_sub_expr = IsCached()
         self._functions: Dict[str, ast.FunctionDef] = {}
         self._main_function = False
         self._namespace: Dict[str, Any] = {**globalns, **captured}
+        self._replacement: Dict[str, Any] = {}
         self._scopes: List[Set[str]] = []
         for exc in skip:
             self._namespace.pop(exc, ...)
@@ -94,7 +100,6 @@ class Optimizer(ast.NodeTransformer):
 
     def _visit_value(self, expr: ast.expr) -> Tuple[ast.expr, Any]:
         result = self.visit(expr)
-        assert isinstance(result, ast.expr)
         return result, self._get_value(result)
 
     def _eval(self, expr: ast.expr) -> Any:
@@ -102,6 +107,14 @@ class Optimizer(ast.NodeTransformer):
         return eval(
             compile(ast.Expression(expr), "<ast>", mode="eval"), self._namespace, {}
         )
+
+    @typing.overload
+    def visit(self, node: ast.expr) -> ast.expr:
+        ...
+
+    @typing.overload
+    def visit(self, node: ast.AST) -> NodeTransformation:
+        ...
 
     def visit(self, node: ast.AST) -> NodeTransformation:
         if isinstance(node, ast.expr):
@@ -121,11 +134,7 @@ class Optimizer(ast.NodeTransformer):
             result = super().generic_visit(node)
             assert isinstance(result, ast.expr)
             if self._cached_sub_expr:
-                with contextlib.suppress(Exception):
-                    value = self._eval(result)
-                    if not as_predicate(settings.skipped_functions)(value):
-                        return self._cache(value)
-            return result
+                return self._cache(self._eval(result))
         if isinstance(node, ast.stmt):
             self._scopes.append(set())
             try:
@@ -144,6 +153,31 @@ class Optimizer(ast.NodeTransformer):
             elif result is not None:
                 yield from result
 
+    def _to_assign(
+        self, target: ast.expr, value: Any, fallback: Callable[[ast.expr], Any] = None
+    ) -> Iterator[Tuple[str, Any]]:
+        if isinstance(target, ast.Name) and value is not Undefined:
+            yield target.id, value
+        elif isinstance(target, (ast.Tuple, ast.List)) and isinstance(
+            value, Collection
+        ):
+            if not isinstance(value, Sequence):
+                value = list(value)
+            offset = 0
+            for i, elt in enumerate(target.elts):
+                if isinstance(elt, ast.Starred):
+                    assert offset == 0
+                    offset = len(value) - len(target.elts)
+                    yield from self._to_assign(
+                        elt, list(value[i : i + offset + 1]), fallback
+                    )
+                else:
+                    yield from self._to_assign(elt, value[i + offset], fallback)
+        elif fallback is not None:
+            fallback(target)
+        else:
+            raise NotImplementedError
+
     def _discard(self, target: ast.expr):
         if isinstance(target, ast.Name):
             self._namespace.pop(target.id, ...)
@@ -155,29 +189,13 @@ class Optimizer(ast.NodeTransformer):
         else:
             raise NotImplementedError
 
-    def _assign(
-        self, target: ast.expr, value: Any, fallback: Callable[[ast.expr], Any] = None
-    ):
-        if fallback is None:
-            fallback = self._discard
-        if isinstance(target, ast.Name) and value is not Undefined:
-            self._scopes[-1].add(target.id)
-            self._namespace[target.id] = value
-        elif isinstance(target, (ast.Tuple, ast.List)) and isinstance(
-            value, Collection
-        ):
-            if not isinstance(value, Sequence):
-                value = list(value)
-            offset = 0
-            for i, elt in enumerate(target.elts):
-                if isinstance(elt, ast.Starred):
-                    assert offset == 0
-                    offset = len(value) - len(target.elts)
-                    self._assign(elt, list(value[i : i + offset + 1]))
-                else:
-                    self._assign(elt, value[i + offset])
-        else:
-            fallback(target)
+    def _assign(self, target: ast.expr, value: Any):
+        for name, val in self._to_assign(target, value, self._discard):
+            if name in self.skipped:
+                self._namespace.pop(name, ...)
+            else:
+                self._scopes[-1].add(name)
+                self._namespace[name] = value
 
     def visit_Assign(self, node: ast.Assign) -> NodeTransformation:
         node.value, value = self._visit_value(node.value)
@@ -201,6 +219,23 @@ class Optimizer(ast.NodeTransformer):
         return node
 
     visit_Num = visit_Str = visit_Bytes = visit_NameConstant = visit_Ellipsis = visit_Constant  # type: ignore
+
+    def visit_DictComp(self, node: ast.DictComp) -> NodeTransformation:
+        key_values = self._visit_comp(
+            node.generators,
+            lambda: (
+                self.visit(copy.deepcopy(node.key)),
+                self.visit(copy.deepcopy(node.value)),
+            ),
+        )
+        if key_values is not None:
+            keys, values = zip(*key_values)
+            return ast.Dict(keys=list(keys), values=list(values))
+        else:
+            return self.generic_visit(node)
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> NodeTransformation:
+        return node
 
     def visit_For(self, node: ast.For) -> NodeTransformation:
         node.iter, value = self._visit_value(node.iter)
@@ -245,12 +280,69 @@ class Optimizer(ast.NodeTransformer):
     def visit_Lambda(self, node: ast.Lambda) -> NodeTransformation:
         return node
 
+    def _visit_comp(
+        self, generators: Sequence[ast.comprehension], visit: Callable[[], T]
+    ) -> Optional[Sequence[T]]:
+        iters = []
+        for generator in generators:
+            generator.iter, value = self._visit_value(generator.iter)
+            if value is Undefined:
+                return None
+            iters.append(value)
+        elts = []
+        for values in itertools.product(*iters):
+            replacement_save = self._replacement.copy()
+            skip_elt = False
+            try:
+                for generator, value in zip(generators, values):
+                    self._replacement.update(
+                        {
+                            name: self._cache(value)
+                            for name, value in self._to_assign(generator.target, value)
+                        }
+                    )
+                    for if_expr in generator.ifs:
+                        _, if_value = self._visit_value(copy.deepcopy(if_expr))
+                        if if_value is Undefined:
+                            return None
+                        elif not if_value:
+                            skip_elt = True
+                            break
+                    if skip_elt:
+                        break
+                if not skip_elt:
+                    elts.append(visit())
+            finally:
+                self._replacement = replacement_save
+        return elts
+
+    def visit_ListComp(self, node: ast.ListComp) -> NodeTransformation:
+        elts = self._visit_comp(
+            node.generators, lambda: self.visit(copy.deepcopy(node.elt))
+        )
+        if elts is not None:
+            return ast.List(elts=elts, ctx=ast.Load())
+        else:
+            return self.generic_visit(node)
+
     def visit_Name(self, node: ast.Name) -> NodeTransformation:
         if isinstance(node.ctx, ast.Load):
+            if node.id in self._replacement:
+                self._cached_sub_expr &= True
+                return self._replacement[node.id]
             self._cached_sub_expr &= (
                 node.id in self._namespace or node.id in constants.BUILTINS
             )
         return node
+
+    def visit_SetComp(self, node: ast.SetComp) -> NodeTransformation:
+        elts = self._visit_comp(
+            node.generators, lambda: self.visit(copy.deepcopy(node.elt))
+        )
+        if elts is not None:
+            return ast.Set(elts=elts)
+        else:
+            return self.generic_visit(node)
 
 
 Func = TypeVar("Func", bound=Callable)
@@ -326,3 +418,7 @@ def optimize(
     if partial_args:
         result = functools.partial(result, *orig_func.args, **orig_func.keywords)
     return cast(Func, result)
+
+
+def is_optimized(func: Callable) -> bool:
+    return hasattr(func, constants.OPTIMIZED_AST_ATTR)
