@@ -2,7 +2,17 @@ import ast
 import inspect
 import sys
 import textwrap
-from typing import Any, Callable, Dict, Iterable, Mapping, Sequence, TypeVar, Union
+from typing import (
+    Any,
+    Callable,
+    Collection,
+    Dict,
+    Iterable,
+    Mapping,
+    Sequence,
+    TypeVar,
+    Union,
+)
 
 from closure_optimizer.constants import OPTIMIZED_AST_ATTR
 
@@ -76,11 +86,19 @@ def map_parameters(
 
 
 Predicate = Callable[[T], bool]
-IterableOrPredicate = Union[Iterable[T], Predicate[T]]
+IterableOrPredicate = Union[Collection[T], Predicate[T]]
 
 
 def as_predicate(iter_or_pred: IterableOrPredicate[T]) -> Predicate[T]:
-    return iter_or_pred if callable(iter_or_pred) else iter_or_pred.__contains__  # type: ignore
+    predicate = iter_or_pred if callable(iter_or_pred) else iter_or_pred.__contains__
+
+    def wrap(arg: T) -> bool:
+        try:
+            return predicate(arg)  # type: ignore
+        except Exception:
+            return False
+
+    return wrap
 
 
 class ImpurForLoop(Exception):

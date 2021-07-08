@@ -21,7 +21,7 @@ from typing import (
     cast,
 )
 
-from closure_optimizer import constants, settings
+from closure_optimizer import constants
 from closure_optimizer.utils import (
     CONSTANT_NODES,
     CONSTANT_NODE_BY_TYPE,
@@ -50,6 +50,7 @@ class IsCached:
         return self
 
 
+is_builtin = as_predicate(constants.BUILTINS)
 Undefined = object()
 
 Node = TypeVar("Node", bound=ast.AST)
@@ -61,12 +62,14 @@ class Optimizer(ast.NodeTransformer):
         self,
         globalns: Mapping[str, Any],
         captured: Dict[str, Any],
-        skip: Collection[str],
+        execute: Predicate[Callable],
         inline: Predicate[Callable],
+        skip: Collection[str],
     ):
+        self.execute = execute
         self.inline = inline
+        self.skip = set(skip)
         self._captured = captured
-        self.skipped = set(skip)
         self._counter = 0
         self._cached_sub_expr = IsCached()
         self._functions: Dict[str, ast.FunctionDef] = {}
@@ -88,15 +91,17 @@ class Optimizer(ast.NodeTransformer):
             return ast.Name(id=name, ctx=ast.Load())
 
     def _get_value(self, expr: ast.expr) -> Any:
-        if isinstance(expr, ast.Name) and expr.id in self._namespace:
-            assert isinstance(expr.ctx, ast.Load)
-            return self._namespace[expr.id]
-        elif isinstance(expr, ast.Ellipsis):
+        if isinstance(expr, ast.Name):
+            if expr.id in self._namespace:
+                assert isinstance(expr.ctx, ast.Load)
+                return self._namespace[expr.id]
+            if expr.id in constants.BUILTIN_NAMES:
+                return self._eval(expr)
+        if isinstance(expr, ast.Ellipsis):
             return ...
-        elif isinstance(expr, CONSTANT_NODES):
+        if isinstance(expr, CONSTANT_NODES):
             return getattr(expr, expr._fields[0])
-        else:
-            return Undefined
+        return Undefined
 
     def _visit_value(self, expr: ast.expr) -> Tuple[ast.expr, Any]:
         result = self.visit(expr)
@@ -191,7 +196,7 @@ class Optimizer(ast.NodeTransformer):
 
     def _assign(self, target: ast.expr, value: Any):
         for name, val in self._to_assign(target, value, self._discard):
-            if name in self.skipped:
+            if name in self.skip:
                 self._namespace.pop(name, ...)
             else:
                 self._scopes[-1].add(name)
@@ -212,6 +217,15 @@ class Optimizer(ast.NodeTransformer):
 
     def visit_AugAssign(self, node: ast.AugAssign) -> NodeTransformation:
         self._discard(node.target)
+        return self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> NodeTransformation:
+        node.func, func = self._visit_value(node.func)
+        self._cached_sub_expr &= func is not Undefined and self.execute(
+            getattr(type(func.__self__), func.__name__)
+            if hasattr(func, "__self__")
+            else func
+        )
         return self.generic_visit(node)
 
     def visit_Constant(self, node: ast.Constant) -> NodeTransformation:
@@ -239,11 +253,7 @@ class Optimizer(ast.NodeTransformer):
 
     def visit_For(self, node: ast.For) -> NodeTransformation:
         node.iter, value = self._visit_value(node.iter)
-        if (
-            not is_pure_for_loop(node)
-            or not isinstance(value, Collection)
-            or len(value) > settings.loop_enrolling_limit
-        ):
+        if not is_pure_for_loop(node) or not isinstance(value, Collection):
             return self.generic_visit(node)
         for elt in value:
             yield from self._visit_and_flatten(
@@ -331,7 +341,7 @@ class Optimizer(ast.NodeTransformer):
                 self._cached_sub_expr &= True
                 return self._replacement[node.id]
             self._cached_sub_expr &= (
-                node.id in self._namespace or node.id in constants.BUILTINS
+                node.id in self._namespace or node.id in constants.BUILTIN_NAMES
             )
         return node
 
@@ -351,22 +361,30 @@ Func = TypeVar("Func", bound=Callable)
 def optimize(
     func: Func,
     *,
-    skip: Collection[str] = (),
+    execute: IterableOrPredicate[Callable] = (),
     inline: IterableOrPredicate[Callable] = (),
+    skip: Collection[str] = (),
 ) -> Func:
     if isinstance(func, functools.partial):
         partial_args = map_parameters(func.func, func.args, func.keywords, partial=True)
         orig_func, func = func, func.func  # type: ignore
     else:
         orig_func, partial_args = None, {}  # type: ignore
-
     captured = get_captured(func)
     captured.update(partial_args)
+    inline_pred = as_predicate(inline)
+    execute_pred = as_predicate(execute)
+
+    def inline_guard(f: Callable) -> bool:
+        if isinstance(f, functools.partial):
+            f = f.func
+        return f != func and inline_pred(f)
+
+    def builtin_or_exec(f: Callable):
+        return is_builtin(f) or execute_pred(f)
+
     optimizer = Optimizer(
-        func.__globals__,  # type: ignore
-        captured,
-        skip,
-        lambda f, pred=as_predicate(inline): f != func and pred(f),  # type: ignore
+        func.__globals__, captured, builtin_or_exec, inline_guard, skip  # type: ignore
     )
     optimized_ast = optimizer.visit(get_function_ast(func))
     for key in partial_args:

@@ -1,6 +1,6 @@
 PREFIX = "_closure_optimizer_"
 OPTIMIZED_AST_ATTR = f"{PREFIX}ast"
-_buitins = (
+BUILTINS = (
     abs,
     all,
     any,
@@ -22,6 +22,7 @@ _buitins = (
     format,
     frozenset,
     getattr,
+    globals,
     hasattr,
     hash,
     hex,
@@ -58,4 +59,4 @@ _buitins = (
     type,
     zip,
 )
-BUILTINS = set(f.__name__ for f in _buitins)  # type: ignore
+BUILTIN_NAMES = set(f.__name__ for f in BUILTINS)  # type: ignore

@@ -163,3 +163,35 @@ def test_comprehension():
         return _1
 
     assert_optimized(f, g)
+
+
+def test_exec_function():
+    def identity(a):
+        return a
+
+    def f():
+        return identity(0)
+
+    def g():
+        return 0
+
+    assert_optimized(f, f)
+    assert_optimized(optimize(f, execute={identity}), g)
+
+
+def test_exec_method():
+    def f():
+        return list({0: 1}.items())
+
+    _1 = {0: 1}.items
+
+    def g():
+        return list(_1())
+
+    _2 = [(0, 1)]
+
+    def h():
+        return _2
+
+    # assert_optimized(f, g)
+    assert_optimized(optimize(f, execute={dict.items}), h)

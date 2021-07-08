@@ -1,3 +1,2 @@
-__all__ = ["optimize", "settings"]
+__all__ = ["optimize"]
 from .optimizer import optimize
-from . import settings
