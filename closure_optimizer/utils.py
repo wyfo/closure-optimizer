@@ -10,11 +10,15 @@ from typing import (
     Iterable,
     Mapping,
     Sequence,
+    Set,
     TypeVar,
     Union,
+    cast,
 )
 
-from closure_optimizer.constants import OPTIMIZED_AST_ATTR
+from closure_optimizer.constants import PREFIX
+
+METADATA_ATTR = f"{PREFIX}ast"
 
 T = TypeVar("T")
 
@@ -22,8 +26,8 @@ T = TypeVar("T")
 def get_function_ast(obj: Callable) -> ast.FunctionDef:
     if obj.__name__ == "<lambda>":
         raise ValueError("Lambda are not supported")
-    if hasattr(obj, OPTIMIZED_AST_ATTR):
-        return getattr(obj, OPTIMIZED_AST_ATTR)
+    if hasattr(obj, METADATA_ATTR):
+        return getattr(obj, METADATA_ATTR)
     while hasattr(obj, "__wrapped__"):
         obj = obj.__wrapped__  # type: ignore
     node = ast.parse(textwrap.dedent(inspect.getsource(obj))).body[0]
@@ -39,18 +43,16 @@ def get_captured(func: Callable) -> Dict[str, Any]:
 
 
 def map_parameters(
-    func: Callable,
+    parameters: Iterable[inspect.Parameter],
     args: Sequence[Any],
     kwargs: Mapping[str, Any],
     *,
     partial: bool = False,
 ) -> Mapping[str, Any]:
-    if hasattr(func, "__wrapped__") or hasattr(func, "__signature__"):
-        return {}
     offset = 0
     kwargs = dict(kwargs)
     result: Dict[str, Any] = {}
-    for param in inspect.signature(func).parameters.values():
+    for param in parameters:
         if param.kind == inspect.Parameter.VAR_POSITIONAL:
             if not partial:
                 result[param.name] = tuple(args[offset:])
@@ -74,6 +76,29 @@ def map_parameters(
     return result
 
 
+def ast_parameters(node: ast.FunctionDef) -> Iterable[inspect.Parameter]:
+    posonly_args = node.args.posonlyargs if sys.version_info >= (3, 8) else []
+    for arg, kind, default in zip(
+        posonly_args + node.args.args,
+        [inspect.Parameter.POSITIONAL_ONLY] * len(posonly_args)
+        + [inspect.Parameter.POSITIONAL_OR_KEYWORD] * len(node.args.args),  # type: ignore
+        [inspect.Parameter.empty]
+        * (len(posonly_args) + len(node.args.args) - len(node.args.defaults))
+        + node.args.defaults,
+    ):
+        yield inspect.Parameter(arg.arg, kind, default=default)
+    if node.args.vararg is not None:
+        yield inspect.Parameter(node.args.vararg.arg, inspect.Parameter.VAR_POSITIONAL)
+    for arg, default in zip(node.args.kwonlyargs, node.args.kw_defaults):
+        yield inspect.Parameter(
+            arg.arg,
+            inspect.Parameter.KEYWORD_ONLY,
+            default=default or inspect.Parameter.empty,
+        )
+    if node.args.kwarg is not None:
+        yield inspect.Parameter(node.args.kwarg.arg, inspect.Parameter.VAR_KEYWORD)
+
+
 Predicate = Callable[[T], bool]
 IterableOrPredicate = Union[Collection[T], Predicate[T]]
 
@@ -90,71 +115,186 @@ def as_predicate(iter_or_pred: IterableOrPredicate[T]) -> Predicate[T]:
     return wrap
 
 
-class ImpurForLoop(Exception):
+class NotUnrollable(Exception):
     pass
 
 
-class PureForLoopChecker(ast.NodeVisitor):
+class UnrollableChecker(ast.NodeVisitor):
     def visit_Break(self, node: ast.Break):
-        raise ImpurForLoop
+        raise NotUnrollable
 
     def visit_Continue(self, node: ast.Continue):
-        raise ImpurForLoop
+        raise NotUnrollable
 
     def visit_For(self, node: ast.For):
         if node.orelse:
-            raise ImpurForLoop
+            raise NotUnrollable
         self.generic_visit(node)
 
 
-def is_pure_for_loop(node: ast.For) -> bool:
+def is_unrollable(node: ast.For) -> bool:
     try:
-        PureForLoopChecker().visit(node)
-    except ImpurForLoop:
+        UnrollableChecker().visit(node)
+    except NotUnrollable:
         return False
     else:
         return True
 
 
-CONSTANT_NODES = (
-    ast.Constant,
-    ast.Num,
-    ast.Str,
-    ast.Bytes,
-    ast.NameConstant,
-    ast.Ellipsis,
-)
-CONSTANT_NODE_BY_TYPE: Mapping[type, Callable[[Any], ast.expr]] = {}
-if sys.version_info < (3, 8):
-    CONSTANT_NODE_BY_TYPE = {
-        int: ast.Num,
-        float: ast.Num,
-        str: ast.Str,
-        bytes: ast.Bytes,
-        bool: ast.NameConstant,
-        type(None): ast.NameConstant,
-        type(...): lambda _: ast.Ellipsis(),
-    }
-else:
-    CONSTANT_NODE_BY_TYPE = dict.fromkeys(
-        (int, float, str, bytes, bool, type(None), type(...)), ast.Constant
-    )
-
 NodeTransformation = Union[ast.AST, Iterable[ast.AST], None]
 
 
+def flatten(node: NodeTransformation) -> Iterable[ast.AST]:
+    if isinstance(node, ast.AST):
+        yield node
+    elif node is not None:
+        yield from node
+
+
+class NameGenerator:
+    def __init__(self, prefix: str):
+        self.prefix = prefix
+        self._counter = 0
+
+    def __call__(self):
+        self._counter += 1
+        return f"{self.prefix}{self._counter}"
+
+
 class Renamer(ast.NodeVisitor):
-    def __init__(self, generate_name: Callable[[], str]):
+    def __init__(self, generate_name: Callable[[], str], only_declared: bool):
         self.generate_name = generate_name
+        self.only_declared = only_declared
+        self._declared: Set[str] = set()
         self._mapping: Dict[str, str] = {}
 
+    def _rename(self, name: str) -> str:
+        if name not in self._mapping:
+            self._mapping[name] = self.generate_name()
+        return self._mapping[name]
+
+    def visit_arg(self, node: ast.arg):
+        node.arg = self._rename(node.arg)
+        self.generic_visit(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef):
+        node.name = self._rename(node.name)
+        self.generic_visit(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef):
+        node.name = self._rename(node.name)
+        self.generic_visit(node)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef):
+        node.name = self._rename(node.name)
+        self.generic_visit(node)
+
+    def visit_Global(self, node: ast.Global):
+        raise NotImplementedError
+
+    def visit_Nonlocal(self, node: ast.Nonlocal):
+        raise NotImplementedError
+
     def visit_Name(self, node: ast.Name):
-        if node.id not in self._mapping:
-            self._mapping[node.id] = self.generate_name()
-        node.id = self._mapping[node.id]
+        if not self.only_declared:
+            node.id = self._rename(node.id)
+        elif isinstance(node.ctx, ast.Store):
+            node.id = self._rename(node.id)
+        elif node.id in self._mapping:
+            node.id = self._mapping[node.id]
+        self.generic_visit(node)
 
 
-def rename(node: ast.AST, generate_name: Callable[[], str]) -> Mapping[str, str]:
-    renamer = Renamer(generate_name)
+def rename(
+    node: ast.AST, generate_name: Callable[[], str], *, only_declared: bool = False
+) -> Mapping[str, str]:
+    renamer = Renamer(generate_name, only_declared)
     renamer.visit(node)
     return renamer._mapping
+
+
+class NotInlinable(Exception):
+    pass
+
+
+class Return(Exception):
+    pass
+
+
+class InlinableChecker(ast.NodeVisitor):
+    def visit_Global(self, node: ast.Global):
+        raise NotInlinable
+
+    def visit_Import(self, node: ast.Import):
+        raise NotInlinable
+
+    def visit_ImportFrom(self, node: ast.ImportFrom):
+        raise NotInlinable
+
+    def visit_Nonlocal(self, node: ast.Nonlocal):
+        raise NotInlinable
+
+    def visit_Return(self, node: ast.Return):
+        raise Return
+
+    def _cannot_return(self, node: ast.stmt):
+        try:
+            self.generic_visit(node)
+        except Return:
+            raise NotInlinable
+
+    def visit_For(self, node: ast.For):
+        return self._cannot_return(node)
+
+    def visit_While(self, node: ast.While):
+        return self._cannot_return(node)
+
+    def visit_With(self, node: ast.With):
+        return self._cannot_return(node)
+
+    def _does_return(self, stmts: Sequence[ast.stmt]) -> bool:
+        try:
+            for stmt in stmts:
+                self.visit(stmt)
+        except Return:
+            return False
+        else:
+            return True
+
+    def visit_If(self, node: ast.If):
+        if self._does_return(node.body) != self._does_return(node.orelse):
+            raise NotInlinable
+
+
+def is_inlinable(node: ast.AST) -> bool:
+    try:
+        InlinableChecker().visit(node)
+    except Return:
+        return True
+    except NotUnrollable:
+        return False
+    else:
+        return True
+
+
+class ReturnReplacer(ast.NodeTransformer):
+    def __init__(self, name: str):
+        self.name = name
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> NodeTransformation:
+        return node
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> NodeTransformation:
+        return node
+
+    def visit_Return(self, node: ast.Return) -> NodeTransformation:
+        return ast.Assign(
+            targets=[ast.Name(id=self.name, ctx=ast.Store())], value=node.value
+        )
+
+    def visit(self, node: ast.AST) -> NodeTransformation:
+        return node if isinstance(node, ast.expr) else super().visit(node)
+
+
+def replace_return(node: ast.stmt, name: str) -> ast.stmt:
+    return cast(ast.stmt, ReturnReplacer(name).visit(node))

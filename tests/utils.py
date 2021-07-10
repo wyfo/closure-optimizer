@@ -4,8 +4,9 @@ import sys
 from functools import partial
 from typing import Any, Callable, Dict, Optional
 
-from closure_optimizer import constants, optimize
-from closure_optimizer.utils import get_function_ast
+from closure_optimizer import optimize
+from closure_optimizer.constants import PREFIX
+from closure_optimizer.utils import METADATA_ATTR, get_function_ast
 
 
 def compare_ast(
@@ -16,13 +17,11 @@ def compare_ast(
     if (
         isinstance(node1, ast.Name)
         and isinstance(node2, ast.Name)
-        and type(node1.ctx) == type(node2.ctx)
+        and type(node1.ctx) == type(node2.ctx)  # noqa: E721
     ):
         if node1.id in name_mapping:
             return node2.id == name_mapping.get(node1.id)
-        elif node1.id.startswith(constants.PREFIX) or node2.id.startswith(
-            constants.PREFIX
-        ):
+        elif node1.id.startswith(PREFIX) or node2.id.startswith(PREFIX):
             name_mapping[node1.id] = node2.id
             return True
         else:
@@ -62,7 +61,7 @@ def compare_func_body(func1: Callable, func2: Callable) -> bool:
 def assert_optimized(__func: Callable, __ref: Callable, *args, **kwargs):
     if isinstance(__func, functools.partial):
         __ref = functools.partial(__ref, *__func.args, **__func.keywords)
-    if not hasattr(__func, constants.OPTIMIZED_AST_ATTR):
+    if not hasattr(__func, METADATA_ATTR):
         __func = optimize(__func)
     assert compare_func_body(__func, __ref)
     assert __func(*args, **kwargs) == __ref(*args, **kwargs)

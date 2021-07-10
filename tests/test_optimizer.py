@@ -33,6 +33,12 @@ def test_does_not_evaluate_skipped():
     def f():
         return eval("42") + (a + 0)
 
+    import ast
+    import closure_optimizer.utils
+
+    print()
+    print(ast.dump(closure_optimizer.utils.get_function_ast(f)))
+    print(ast.dump(closure_optimizer.utils.get_function_ast(optimize(f, skip={"a"}))))
     assert_optimized(optimize(f, skip={"a"}), f)
 
 
@@ -193,5 +199,46 @@ def test_exec_method():
     def h():
         return _2
 
-    # assert_optimized(f, g)
+    assert_optimized(f, g)
     assert_optimized(optimize(f, execute={dict.items}), h)
+
+
+def test_inline():
+    def inlined(a, b=1):
+        c = 2
+        return a + b + c
+
+    def f(a):
+        return inlined(a)
+
+    def g(a):
+        _1 = a
+        _2 = 1
+        _3 = 2
+        _4 = _1 + _2 + _3
+        return _4
+
+    assert_optimized(f, f, 0)
+    assert_optimized(optimize(f, inline={inlined}), g, 0)
+
+
+def test_inline_local():
+    def f(a):
+        def g(a, b=1):
+            c = 2
+            return a + b + c
+
+        return g(a)
+
+    def g(a):
+        def g(a, b=1):
+            c = 2
+            return a + b + c
+
+        _1 = a
+        _2 = 1
+        _3 = 2
+        _4 = _1 + _2 + _3
+        return _4
+
+    assert_optimized(f, g, 0)
