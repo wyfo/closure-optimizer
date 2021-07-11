@@ -50,18 +50,12 @@ from closure_optimizer.utils import (
 )
 
 
-class IsCached:
-    def __init__(self):
-        self._is_cached: Optional[bool] = None
-
+class NotLoad:
     def __bool__(self):
-        return bool(self._is_cached)
+        return False
 
-    def __iand__(self, other):
-        if self._is_cached is None:
-            self._is_cached = True
-        self._is_cached &= bool(other)
-        return self
+    def __and__(self, other) -> bool:
+        return bool(other)
 
 
 is_builtin = as_predicate(BUILTINS)
@@ -114,7 +108,7 @@ class Optimizer(ast.NodeTransformer):
         self.skip = set(skip)
         self._captured = captured
         self._counter = 0
-        self._cached_sub_expr = IsCached()
+        self._cached_sub_expr: Union[bool, NotLoad] = NotLoad()
         self._functions: Dict[str, ast.FunctionDef] = {}
         self._inlining: List[ast.stmt] = []
         self._inline_guard: Set[str] = set()
@@ -134,7 +128,7 @@ class Optimizer(ast.NodeTransformer):
             self._namespace[name] = value
             return ast.Name(id=name, ctx=ast.Load())
 
-    def _get_value(self, expr: ast.expr) -> Any:
+    def _get_value(self, expr: ast.expr, as_boolean=False) -> Any:
         if isinstance(expr, ast.Name):
             if expr.id in self._namespace:
                 assert isinstance(expr.ctx, ast.Load)
@@ -145,11 +139,26 @@ class Optimizer(ast.NodeTransformer):
             return ...
         if isinstance(expr, CONSTANT_NODES):
             return getattr(expr, expr._fields[0])
+        if as_boolean:
+            if isinstance(expr, ast.BoolOp):
+                for operand in expr.values:
+                    value = self._get_value(operand, as_boolean=True)
+                    if value is not Undefined:
+                        if (isinstance(expr.op, ast.And) and not value) or (
+                            isinstance(expr.op, ast.Or) and value
+                        ):
+                            return bool(value)
+                    elif not isinstance(operand, ast.Name):
+                        break
+            if isinstance(expr, ast.UnaryOp) and isinstance(expr.op, ast.Not):
+                value = self._get_value(expr.operand, as_boolean=True)
+                if value is not Undefined:
+                    return not value
         return Undefined
 
-    def _visit_value(self, expr: ast.expr) -> Tuple[ast.expr, Any]:
+    def _visit_value(self, expr: ast.expr, as_boolean=False) -> Tuple[ast.expr, Any]:
         result = self.visit(expr)
-        return result, self._get_value(result)
+        return result, self._get_value(result, as_boolean)
 
     def _eval(self, expr: ast.expr) -> Any:
         expr = ast.fix_missing_locations(expr)
@@ -172,10 +181,10 @@ class Optimizer(ast.NodeTransformer):
     def visit(self, node: ast.AST) -> NodeTransformation:
         if isinstance(node, ast.expr):
             cached_expr = self._cached_sub_expr
-            self._cached_sub_expr = IsCached()
+            self._cached_sub_expr = NotLoad()
             try:
                 result = super().visit(node)
-                cached_expr &= self._cached_sub_expr
+                cached_expr &= bool(self._cached_sub_expr)
                 return result
             finally:
                 self._cached_sub_expr = cached_expr
@@ -248,6 +257,21 @@ class Optimizer(ast.NodeTransformer):
         self._discard(node.target)
         return self.generic_visit(node)
 
+    def visit_BoolOp(self, node: ast.BoolOp) -> NodeTransformation:
+        values = enumerate(node.values.copy())
+        for i, operand in values:
+            node.values[i], value = self._visit_value(operand)
+            if value is not Undefined:
+                if (isinstance(node.op, ast.And) and not value) or (
+                    isinstance(node.op, ast.Or) and value
+                ):
+                    return node.values[i]
+            else:
+                break
+        for i, operand in values:
+            node.values[i] = self.visit(operand)
+        return node
+
     def _inline(
         self,
         node: ast.Call,
@@ -290,7 +314,7 @@ class Optimizer(ast.NodeTransformer):
     def visit_Call(self, node: ast.Call) -> NodeTransformation:
         node.func, func = self._visit_value(node.func)
         # Use list(map(...)) instead of only map because of pypy issue
-        # https://foss.heptapod.net/pypy/pypy/-/issues/3512
+        # https://foss.heptapod.net/pypy/pypy/-/issues/3440
         node.args[:] = list(map(self.visit, node.args))
         node.keywords[:] = list(map(self.visit, node.keywords))
         inlined = None
@@ -422,7 +446,7 @@ class Optimizer(ast.NodeTransformer):
         return self.generic_visit(node)
 
     def visit_If(self, node: ast.If) -> NodeTransformation:
-        node.test, value = self._visit_value(node.test)
+        node.test, value = self._visit_value(node.test, as_boolean=True)
         if value is Undefined:
             return self.generic_visit(node)
         elif value:
@@ -431,7 +455,7 @@ class Optimizer(ast.NodeTransformer):
             return self._visit_and_flatten(node.orelse)
 
     def visit_IfExp(self, node: ast.IfExp) -> NodeTransformation:
-        node.test, value = self._visit_value(node.test)
+        node.test, value = self._visit_value(node.test, as_boolean=True)
         if value is Undefined:
             return self.generic_visit(node)
         elif value:

@@ -242,3 +242,17 @@ def test_inline_local():
         return _4
 
     assert_optimized(f, g, 0)
+
+
+def test_bool_op():
+    def f(a):
+        if a and 0:
+            raise
+        if not (a or 1):
+            raise
+        return (0 and a) + (1 and a) + (a and 0) + (0 or a) + (1 or a) + (a or 1)
+
+    def g(a):
+        return 0 + (1 and a) + (a and 0) + (0 or a) + 1 + (a or 1)
+
+    assert_optimized(f, g, 0)
