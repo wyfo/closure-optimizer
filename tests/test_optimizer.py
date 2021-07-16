@@ -73,7 +73,7 @@ def test_assign():
 
     def g():
         b = 1
-        return b
+        return 1
 
     assert_optimized(f, g)
 

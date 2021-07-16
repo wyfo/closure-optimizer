@@ -233,7 +233,7 @@ class Optimizer(ast.NodeTransformer):
 
     def _assign(self, target: ast.expr, value: Any):
         for name, val in assignments(target, value, self._discard):
-            if name in self.skip:
+            if name in self.skip or val.__class__ not in CONSTANT_NODE_BY_TYPE:
                 self._namespace.pop(name, ...)
             else:
                 self._scopes[-1].add(name)
@@ -440,10 +440,11 @@ class Optimizer(ast.NodeTransformer):
     def visit_FunctionDef(self, node: ast.FunctionDef) -> NodeTransformation:
         if not self._main_function:
             self._main_function = True
-        elif node.name not in self.skip:
+            return self.generic_visit(node)
+        else:
             self._functions[node.name] = node
             self._namespace.pop(node.name, ...)
-        return self.generic_visit(node)
+            return node
 
     def visit_If(self, node: ast.If) -> NodeTransformation:
         node.test, value = self._visit_value(node.test, as_boolean=True)
@@ -480,9 +481,13 @@ class Optimizer(ast.NodeTransformer):
             if node.id in self._replacement:
                 self._cached_sub_expr &= True
                 return self._replacement[node.id]
-            self._cached_sub_expr &= (
-                node.id in self._namespace or node.id in BUILTIN_NAMES
-            )
+            if node.id in self._namespace:
+                self._cached_sub_expr &= True
+                value = self._namespace[node.id]
+                if value.__class__ in CONSTANT_NODE_BY_TYPE:
+                    return CONSTANT_NODE_BY_TYPE[value.__class__](value)
+            else:
+                self._cached_sub_expr &= node.id in BUILTIN_NAMES
         return node
 
     def visit_SetComp(self, node: ast.SetComp) -> NodeTransformation:
