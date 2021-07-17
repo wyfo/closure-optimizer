@@ -260,7 +260,7 @@ class Optimizer(ast.NodeTransformer):
 
     def _assign(self, target: ast.expr, value: Any):
         for name, val in assignments(target, value, self._discard):
-            if name in self.skip or val.__class__ not in CONSTANT_NODE_BY_TYPE:
+            if name in self.skip:
                 self._namespace.pop(name, ...)
             else:
                 self._scopes[-1].add(name)
@@ -587,7 +587,7 @@ class Optimizer(ast.NodeTransformer):
             if node.id in self._substitution:
                 self._cached_sub_expr &= True
                 return self._substitution[node.id]
-            if node.id in self._namespace:
+            elif node.id in self._namespace:
                 self._cached_sub_expr &= True
                 value = self._namespace[node.id]
                 if value.__class__ in CONSTANT_NODE_BY_TYPE:
