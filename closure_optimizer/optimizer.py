@@ -12,7 +12,6 @@ from typing import (
     Collection,
     Dict,
     Iterable,
-    Iterator,
     List,
     Mapping,
     Optional,
@@ -38,11 +37,15 @@ from closure_optimizer.utils import (
     NameGenerator,
     NodeTransformation,
     Predicate,
+    Undefined,
     as_predicate,
+    assigned_names,
+    assignments,
     ast_parameters,
     flatten,
     get_captured,
     get_function_ast,
+    get_skipped,
     is_inlinable,
     is_unrollable,
     map_parameters,
@@ -60,53 +63,10 @@ class NotLoad:
 
 
 is_builtin = as_predicate(BUILTINS)
-Undefined = object()
 
 Node = TypeVar("Node", bound=ast.AST)
 T = TypeVar("T")
 Method = TypeVar("Method", bound=Callable[["Optimizer", ast.AST], NodeTransformation])
-
-
-def assignments(
-    target: ast.expr, value: Any, fallback: Callable[[ast.expr], Any] = None
-) -> Iterator[Tuple[str, Any]]:
-    if isinstance(target, ast.Name) and value is not Undefined:
-        yield target.id, value
-    elif isinstance(target, (ast.Tuple, ast.List)) and isinstance(value, Collection):
-        if not isinstance(value, Sequence):
-            value = list(value)
-        offset = 0
-        for i, elt in enumerate(target.elts):
-            if isinstance(elt, ast.Starred):
-                assert offset == 0
-                offset = len(value) - len(target.elts)
-                yield from assignments(
-                    elt.value, list(value[i : i + offset + 1]), fallback
-                )
-            else:
-                yield from assignments(elt, value[i + offset], fallback)
-    elif fallback is not None:
-        fallback(target)
-    else:
-        raise NotImplementedError
-
-
-def assigned_names(target: ast.expr) -> Optional[Collection[str]]:
-    result = set()
-    if isinstance(target, ast.Name):
-        result.add(target.id)
-    elif isinstance(target, (ast.Tuple, ast.List)):
-        for elt in target.elts:
-            if isinstance(elt, ast.Starred):
-                elt = elt.value
-            names = assigned_names(elt)
-            if names is None:
-                return None
-            result.update(names)
-    else:
-        return None
-    return result
-
 
 Comprehension = Union[ast.DictComp, ast.ListComp, ast.SetComp]
 Comp = TypeVar("Comp", bound=Comprehension)
@@ -381,13 +341,18 @@ class Optimizer(ast.NodeTransformer):
             if self.inline(func_or_method):
                 func_ast = copy.deepcopy(get_function_ast(func))
                 if is_inlinable(func_ast):
-                    func_namespace = {**func.__globals__, **get_captured(func)}
+                    func_namespace = {
+                        **func.__globals__,
+                        **get_captured(func_or_method),
+                    }
                     rename_mapping = rename(func_ast, self.name_generator.replace)
+                    skipped = get_skipped(func_or_method)
                     renamed_namespace = {
                         renamed: func_namespace[name]
                         for name, renamed in rename_mapping.items()
-                        if name in func_namespace
+                        if name in func_namespace and name not in skipped
                     }
+                    self.skip.update(rename_mapping[name] for name in skipped)
                     self._namespace.update(renamed_namespace)
                     self._captured.update(renamed_namespace)
                     parameters = [
@@ -626,6 +591,10 @@ class Optimizer(ast.NodeTransformer):
 Func = TypeVar("Func", bound=Callable)
 
 
+def is_optimized(func: Callable) -> bool:
+    return hasattr(func, METADATA_ATTR)
+
+
 def optimize(
     func: Func,
     *,
@@ -701,12 +670,8 @@ def optimize(
     localns: dict = {}
     exec(compiled, func.__globals__, localns)  # type: ignore
     optimized_func = localns["factory"](captured)
-    setattr(optimized_func, METADATA_ATTR, optimized_ast)
+    setattr(optimized_func, METADATA_ATTR, (optimized_ast, optimizer.skip))
     result = functools.wraps(func)(optimized_func)
     if partial_args:
         result = functools.partial(result, *orig_func.args, **orig_func.keywords)
     return cast(Func, result)
-
-
-def is_optimized(func: Callable) -> bool:
-    return hasattr(func, METADATA_ATTR)

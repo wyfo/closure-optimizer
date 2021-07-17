@@ -8,9 +8,12 @@ from typing import (
     Collection,
     Dict,
     Iterable,
+    Iterator,
     Mapping,
+    Optional,
     Sequence,
     Set,
+    Tuple,
     TypeVar,
     Union,
     cast,
@@ -27,7 +30,7 @@ def get_function_ast(obj: Callable) -> ast.FunctionDef:
     if obj.__name__ == "<lambda>":
         raise ValueError("Lambda are not supported")
     if hasattr(obj, METADATA_ATTR):
-        return getattr(obj, METADATA_ATTR)
+        return getattr(obj, METADATA_ATTR)[0]
     while hasattr(obj, "__wrapped__"):
         obj = obj.__wrapped__  # type: ignore
     node = ast.parse(textwrap.dedent(inspect.getsource(obj))).body[0]
@@ -40,6 +43,10 @@ def get_function_ast(obj: Callable) -> ast.FunctionDef:
 def get_captured(func: Callable) -> Dict[str, Any]:
     cells = [cell.cell_contents for cell in func.__closure__ or ()]  # type: ignore
     return dict(zip(func.__code__.co_freevars, cells))
+
+
+def get_skipped(func: Callable) -> Collection[str]:
+    return getattr(func, METADATA_ATTR, (..., ()))[1]
 
 
 def map_parameters(
@@ -313,3 +320,47 @@ class ReturnReplacer(ast.NodeTransformer):
 
 def replace_return(node: ast.stmt, name: str) -> ast.stmt:
     return cast(ast.stmt, ReturnReplacer(name).visit(node))
+
+
+Undefined = object()
+
+
+def assignments(
+    target: ast.expr, value: Any, fallback: Callable[[ast.expr], Any] = None
+) -> Iterator[Tuple[str, Any]]:
+    if isinstance(target, ast.Name) and value is not Undefined:
+        yield target.id, value
+    elif isinstance(target, (ast.Tuple, ast.List)) and isinstance(value, Collection):
+        if not isinstance(value, Sequence):
+            value = list(value)
+        offset = 0
+        for i, elt in enumerate(target.elts):
+            if isinstance(elt, ast.Starred):
+                assert offset == 0
+                offset = len(value) - len(target.elts)
+                yield from assignments(
+                    elt.value, list(value[i : i + offset + 1]), fallback
+                )
+            else:
+                yield from assignments(elt, value[i + offset], fallback)
+    elif fallback is not None:
+        fallback(target)
+    else:
+        raise NotImplementedError
+
+
+def assigned_names(target: ast.expr) -> Optional[Collection[str]]:
+    result = set()
+    if isinstance(target, ast.Name):
+        result.add(target.id)
+    elif isinstance(target, (ast.Tuple, ast.List)):
+        for elt in target.elts:
+            if isinstance(elt, ast.Starred):
+                elt = elt.value
+            names = assigned_names(elt)
+            if names is None:
+                return None
+            result.update(names)
+    else:
+        return None
+    return result

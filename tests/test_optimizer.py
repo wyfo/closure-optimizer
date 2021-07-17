@@ -2,6 +2,7 @@
 import functools
 
 from closure_optimizer import optimize
+from closure_optimizer.utils import get_skipped
 from tests.utils import assert_optimized
 
 
@@ -306,7 +307,7 @@ def test_recursive_inlining():
     _rec = rec
 
     def _nested(i):
-        return nested(i - 1) if i > 0 else 0
+        return _nested(i - 1) if i > 0 else 0
 
     def g(a):
         def nested(i):
@@ -327,3 +328,36 @@ def test_recursive_inlining():
         return 0 + _4 + 0 + _8
 
     assert_optimized(optimize(f, inline={rec}), g, 0)
+
+
+def test_skip_is_preserved_in_inlined_optimized():
+    def to_optimize():
+        a = 0
+        return a
+
+    optimized = optimize(to_optimize, skip={"a"})
+    assert_optimized(optimized, to_optimize)
+
+    def f():
+        return optimized()
+
+    def g():
+        _1 = 0
+        _2 = _1
+        return _2
+
+    assert_optimized(f, g)
+    # optimized f has skipped variables
+    optimized_f = optimize(f)
+    assert get_skipped(optimized_f)
+
+    def h():
+        return optimized_f()
+
+    def i():
+        _1 = 0
+        _2 = _1
+        _3 = _2
+        return _3
+
+    assert_optimized(h, i)
