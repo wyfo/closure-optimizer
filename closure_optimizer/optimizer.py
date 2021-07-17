@@ -631,6 +631,7 @@ def optimize(
     *,
     execute: IterableOrPredicate[Callable] = (),
     inline: IterableOrPredicate[Callable] = (),
+    inline_optimized: bool = True,
     skip: Collection[str] = (),
 ) -> Func:
     if isinstance(func, functools.partial):
@@ -647,7 +648,7 @@ def optimize(
     def inline_guard(f: Callable) -> bool:
         if isinstance(f, functools.partial):
             f = f.func
-        return f != func and inline_pred(f)
+        return f != func and (inline_pred(f) or (inline_optimized and is_optimized(f)))
 
     def builtin_or_exec(f: Callable):
         return is_builtin(f) or execute_pred(f)
