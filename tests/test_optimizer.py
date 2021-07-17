@@ -250,9 +250,17 @@ def test_bool_op():
             raise
         if not (a or 1):
             raise
+        if (a + 1) and 0:
+            raise
+        if not (a + 1 or 1):
+            raise
         return (0 and a) + (1 and a) + (a and 0) + (0 or a) + (1 or a) + (a or 1)
 
     def g(a):
+        if (a + 1) and 0:
+            raise
+        if not (a + 1 or 1):
+            raise
         return 0 + (1 and a) + (a and 0) + (0 or a) + 1 + (a or 1)
 
     assert_optimized(f, g, 0)

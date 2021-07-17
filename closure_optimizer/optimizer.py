@@ -151,7 +151,7 @@ class Optimizer(ast.NodeTransformer):
                             return bool(value)
                     elif not isinstance(operand, ast.Name):
                         break
-            if isinstance(expr, ast.UnaryOp) and isinstance(expr.op, ast.Not):
+            elif isinstance(expr, ast.UnaryOp) and isinstance(expr.op, ast.Not):
                 value = self._get_value(expr.operand, as_boolean=True)
                 if value is not Undefined:
                     return not value
