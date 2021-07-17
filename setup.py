@@ -12,7 +12,7 @@ setup(
     license="MIT",
     packages=find_packages(include=["closure_optimizer"]),
     package_data={"closure_optimizer": ["py.typed"]},
-    description="Optimize Python closures: branch pruning, loop unrolling, function inlining",  # noqa: E501
+    description="Optimize Python closures: branch pruning, loop unrolling, function inlining, etc.",  # noqa: E501
     long_description=README,
     long_description_content_type="text/markdown",
     python_requires=">=3.6",

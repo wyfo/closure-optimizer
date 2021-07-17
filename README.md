@@ -1,2 +1,2 @@
 # closure-optimizer
-Python closure optimization: branch pruning, loop unrolling, function inlining, etc.
+Optimize Python closures: branch pruning, loop unrolling, function inlining, etc.
