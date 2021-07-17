@@ -1,4 +1,5 @@
 import ast
+import contextlib
 import copy
 import functools
 import inspect
@@ -90,7 +91,25 @@ def assignments(
         raise NotImplementedError
 
 
-Comp = TypeVar("Comp", bound=Union[ast.DictComp, ast.ListComp, ast.SetComp])
+def assigned_names(target: ast.expr) -> Optional[Collection[str]]:
+    result = set()
+    if isinstance(target, ast.Name):
+        result.add(target.id)
+    elif isinstance(target, (ast.Tuple, ast.List)):
+        for elt in target.elts:
+            if isinstance(elt, ast.Starred):
+                elt = elt.value
+            names = assigned_names(elt)
+            if names is None:
+                return None
+            result.update(names)
+    else:
+        return None
+    return result
+
+
+Comprehension = Union[ast.DictComp, ast.ListComp, ast.SetComp]
+Comp = TypeVar("Comp", bound=Comprehension)
 
 
 class Optimizer(ast.NodeTransformer):
@@ -115,7 +134,7 @@ class Optimizer(ast.NodeTransformer):
         self._inline_guard: Set[str] = set()
         self._main_function = False
         self._namespace: Dict[str, Any] = {**globalns, **captured}
-        self._replacement: Dict[str, Any] = {}
+        self._substitution: Dict[str, Any] = {}
         self._scopes: List[Set[str]] = []
         for exc in skip:
             self._namespace.pop(exc, ...)
@@ -179,6 +198,10 @@ class Optimizer(ast.NodeTransformer):
         ...
 
     @overload
+    def visit(self, node: ast.arguments) -> ast.arguments:
+        ...
+
+    @overload
     def visit(self, node: ast.AST) -> NodeTransformation:
         ...
 
@@ -219,8 +242,8 @@ class Optimizer(ast.NodeTransformer):
                     self._functions.pop(name, ...)
         return super().generic_visit(node)
 
-    def _visit_and_flatten(self, nodes: Iterable[ast.stmt]) -> Iterable[ast.stmt]:
-        for node in nodes:
+    def _visit_and_flatten(self, stmts: Iterable[ast.stmt]) -> Iterable[ast.stmt]:
+        for node in stmts:
             yield from cast(Iterable[ast.stmt], flatten(self.visit(node)))
 
     def _discard(self, target: ast.expr):
@@ -275,6 +298,15 @@ class Optimizer(ast.NodeTransformer):
         for i, operand in values:
             node.values[i] = self.visit(operand)
         return node
+
+    @contextlib.contextmanager
+    def _disable_inlining(self):
+        enable = self._enable_inlining
+        self._enable_inlining = False
+        try:
+            yield
+        finally:
+            self._enable_inlining = enable
 
     def _inline(
         self,
@@ -385,57 +417,108 @@ class Optimizer(ast.NodeTransformer):
 
     visit_Num = visit_Str = visit_Bytes = visit_NameConstant = visit_Ellipsis = visit_Constant  # type: ignore
 
-    def _visit_comp(
-        self, generators: Sequence[ast.comprehension], visit: Callable[[], T]
-    ) -> Optional[Sequence[T]]:
-        iters = []
-        for generator in generators:
+    def visit_Dict(self, node: ast.Dict) -> NodeTransformation:
+        self._cached_sub_expr = False
+        return self.generic_visit(node)
+
+    def _visit_comprehension(
+        self,
+        node: Comp,
+        visit: Callable[[Comp], T],
+        flatten: Callable[[Sequence[T]], ast.expr],
+        insert: Callable[[Comp, ast.Name], ast.stmt],
+    ) -> Any:
+        self._cached_sub_expr = False
+        # Rename targets in order to not mess the scopes up
+        for i, generator in enumerate(node.generators):
+            names = assigned_names(generator.target)
+            if names is None:
+                return node
+            renaming = {name: self.name_generator() for name in names}
+            rename(generator.target, renaming)
+            for if_expr in generator.ifs:
+                rename(if_expr, renaming)
+            for gen in node.generators[i + 1 :]:
+                rename(gen, renaming)
+            for attr in ["elt", "key", "value"]:
+                if hasattr(node, attr):
+                    rename(getattr(node, attr), renaming)
+        iter_values = []
+        for generator in node.generators:
             generator.iter, value = self._visit_value(generator.iter)
-            if value is Undefined:
-                return None
-            iters.append(value)
-        elts = []
-        for values in itertools.product(*iters):
-            replacement_save = self._replacement.copy()
-            skip_elt = False
-            try:
-                for generator, value in zip(generators, values):
-                    self._replacement.update(
-                        {
-                            name: self._cache(value)
+            iter_values.append(value)
+        if Undefined not in iter_values:
+            flattened, renaming = [], {}
+            for values in itertools.product(*iter_values):
+                keep_elt: Optional[bool] = True
+                substitution = self._substitution.copy()
+                try:
+                    for generator, value in zip(node.generators, values):
+                        self._substitution.update(
+                            (name, self._cache(value))
+                            # assignments can't raise because assigned_names above
                             for name, value in assignments(generator.target, value)
-                        }
-                    )
-                    for if_expr in generator.ifs:
-                        _, if_value = self._visit_value(copy.deepcopy(if_expr))
-                        if if_value is Undefined:
-                            return None
-                        elif not if_value:
-                            skip_elt = True
+                        )
+                        for if_expr in generator.ifs:
+                            with self._disable_inlining():
+                                _, if_value = self._visit_value(copy.deepcopy(if_expr))
+                            if if_value is Undefined:
+                                keep_elt = None
+                                break
+                            elif not if_value:
+                                keep_elt = False
+                                break
+                        if not keep_elt:
                             break
-                    if skip_elt:
+                    if keep_elt:
+                        flattened.append(visit(node))
+                    elif keep_elt is None:
                         break
-                if not skip_elt:
-                    elts.append(visit())
-            except Exception:
-                return None
-            finally:
-                self._replacement = replacement_save
-        return elts
+                finally:
+                    self._substitution = substitution
+            else:
+                return flatten(flattened)
+        name = self.name_generator()
+        variable = ast.Name(id=name, ctx=ast.Load())
+        stmts: List[ast.stmt] = [
+            ast.Assign(targets=[ast.Name(id=name, ctx=ast.Store())], value=flatten([]))
+        ]
+        body = stmts
+        for generator in node.generators:
+            ast_for = ast.For(
+                target=generator.target,
+                iter=generator.iter,
+                body=[],
+                orelse=[],
+                type_comment=None,
+            )
+            body.append(ast_for)
+            body = ast_for.body
+            for if_expr in generator.ifs:
+                ast_if = ast.If(test=if_expr, body=[], orelse=[])
+                body.append(ast_if)
+                body = ast_if.body
+        body.append(insert(node, variable))
+        self._add_inlined(stmts)
+        return variable
 
     def visit_DictComp(self, node: ast.DictComp) -> NodeTransformation:
-        key_values = self._visit_comp(
-            node.generators,
-            lambda: (
+        def flatten(elts: Sequence[Tuple[ast.expr, ast.expr]]) -> ast.Dict:
+            keys, values = zip(*elts) if elts else ((), ())
+            return ast.Dict(keys=list(keys), values=list(values))
+
+        return self._visit_comprehension(
+            node,
+            lambda node: (
                 self.visit(copy.deepcopy(node.key)),
                 self.visit(copy.deepcopy(node.value)),
             ),
+            flatten,
+            lambda node, name: ast.Assign(
+                targets=[ast.Subscript(value=name, slice=node.key, ctx=ast.Store())],
+                value=node.value,
+            ),
         )
-        if key_values is not None:
-            keys, values = zip(*key_values)
-            return ast.Dict(keys=list(keys), values=list(values))
-        else:
-            return self.generic_visit(node)
 
     def visit_GeneratorExp(self, node: ast.GeneratorExp) -> NodeTransformation:
         return node
@@ -444,11 +527,11 @@ class Optimizer(ast.NodeTransformer):
         node.iter, value = self._visit_value(node.iter)
         if not is_unrollable(node) or not isinstance(value, Collection):
             return self.generic_visit(node)
+        stmts: List[ast.stmt] = []
         for elt in value:
-            yield from self._visit_and_flatten(
-                [ast.Assign(targets=[node.target], value=self._cache(elt))]
-            )
-            yield from self._visit_and_flatten(copy.deepcopy(node.body))
+            stmts.append(ast.Assign(targets=[node.target], value=self._cache(elt)))
+            stmts.extend(copy.deepcopy(node.body))
+        return self._visit_and_flatten(stmts)
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> NodeTransformation:
         if not self._main_function:
@@ -478,22 +561,32 @@ class Optimizer(ast.NodeTransformer):
             return self.visit(node.orelse)
 
     def visit_Lambda(self, node: ast.Lambda) -> NodeTransformation:
+        node.args = self.visit(node.args)
         return node
 
+    def visit_List(self, node: ast.List) -> NodeTransformation:
+        self._cached_sub_expr = False
+        return self.generic_visit(node)
+
     def visit_ListComp(self, node: ast.ListComp) -> NodeTransformation:
-        elts = self._visit_comp(
-            node.generators, lambda: self.visit(copy.deepcopy(node.elt))
+        return self._visit_comprehension(
+            node,
+            lambda node: self.visit(copy.deepcopy(node.elt)),
+            lambda elts: ast.List(elts=elts, ctx=ast.Load()),
+            lambda node, name: ast.Expr(
+                value=ast.Call(
+                    func=ast.Attribute(value=name, attr="append", ctx=ast.Load()),
+                    args=[node.elt],
+                    keywords=[],
+                )
+            ),
         )
-        if elts is not None:
-            return ast.List(elts=elts, ctx=ast.Load())
-        else:
-            return self.generic_visit(node)
 
     def visit_Name(self, node: ast.Name) -> NodeTransformation:
         if isinstance(node.ctx, ast.Load):
-            if node.id in self._replacement:
+            if node.id in self._substitution:
                 self._cached_sub_expr &= True
-                return self._replacement[node.id]
+                return self._substitution[node.id]
             if node.id in self._namespace:
                 self._cached_sub_expr &= True
                 value = self._namespace[node.id]
@@ -503,14 +596,31 @@ class Optimizer(ast.NodeTransformer):
                 self._cached_sub_expr &= node.id in BUILTIN_NAMES
         return node
 
+    def visit_Set(self, node: ast.Set) -> NodeTransformation:
+        self._cached_sub_expr = False
+        if not node.elts:
+            return ast.Call(
+                func=ast.Name(id="set", ctx=ast.Load()), args=[], keywords=[]
+            )
+        return self.generic_visit(node)
+
     def visit_SetComp(self, node: ast.SetComp) -> NodeTransformation:
-        elts = self._visit_comp(
-            node.generators, lambda: self.visit(copy.deepcopy(node.elt))
+        return self._visit_comprehension(
+            node,
+            lambda node: self.visit(copy.deepcopy(node.elt)),
+            lambda elts: ast.Set(elts=elts, ctx=ast.Load()),
+            lambda node, name: ast.Expr(
+                value=ast.Call(
+                    func=ast.Attribute(value=name, attr="add", ctx=ast.Load()),
+                    args=[node.elt],
+                    keywords=[],
+                )
+            ),
         )
-        if elts is not None:
-            return ast.Set(elts=elts)
-        else:
-            return self.generic_visit(node)
+
+    def visit_Tuple(self, node: ast.Tuple) -> NodeTransformation:
+        self._cached_sub_expr &= True
+        return self.generic_visit(node)
 
 
 Func = TypeVar("Func", bound=Callable)
