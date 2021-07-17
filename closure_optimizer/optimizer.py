@@ -109,8 +109,9 @@ class Optimizer(ast.NodeTransformer):
         self._captured = captured
         self._counter = 0
         self._cached_sub_expr: Union[bool, NotLoad] = NotLoad()
+        self._enable_inlining = True
         self._functions: Dict[str, ast.FunctionDef] = {}
-        self._inlining: List[ast.stmt] = []
+        self._inlined: List[ast.stmt] = []
         self._inline_guard: Set[str] = set()
         self._main_function = False
         self._namespace: Dict[str, Any] = {**globalns, **captured}
@@ -166,6 +167,9 @@ class Optimizer(ast.NodeTransformer):
             compile(ast.Expression(expr), "<ast>", mode="eval"), self._namespace, {}
         )
 
+    def _add_inlined(self, stmts: Iterable[ast.stmt]):
+        self._inlined.extend(self._visit_and_flatten(stmts))
+
     @overload
     def visit(self, node: ast.expr) -> ast.expr:
         ...
@@ -189,13 +193,13 @@ class Optimizer(ast.NodeTransformer):
             finally:
                 self._cached_sub_expr = cached_expr
         elif isinstance(node, ast.stmt):
-            inlining = self._inlining
-            self._inlining = []
+            inlined = self._inlined
+            self._inlined = []
             try:
                 result = super().visit(node)
-                return (*self._inlining, *flatten(result)) if self._inlining else result
+                return (*self._inlined, *flatten(result)) if self._inlined else result
             finally:
-                self._inlining = inlining
+                self._inlined = inlined
         else:
             return super().visit(node)
 
@@ -274,42 +278,51 @@ class Optimizer(ast.NodeTransformer):
 
     def _inline(
         self,
+        func: Any,
         node: ast.Call,
         func_ast: ast.FunctionDef,
         parameters: Iterable[inspect.Parameter],
         args: List[ast.expr] = None,
         kwargs: Dict[str, ast.expr] = None,
     ) -> Optional[ast.Name]:
-        args, kwargs = args or [], kwargs or {}
-        for arg in node.args:
-            if isinstance(arg, ast.Starred):
-                arg_value = self._get_value(arg.value)
-                if arg_value is Undefined or not isinstance(arg_value, Collection):
-                    return None
-                args.extend(map(self._cache, arg_value))
-            else:
-                arg_value = self._get_value(arg)
-                args.append(arg if arg_value is Undefined else self._cache(arg_value))
-        for kw in node.keywords:
-            kw_value = self._get_value(kw.value)
-            if kw.arg is None:
-                if kw_value is Undefined or not isinstance(kw_value, Mapping):
-                    return None
-                kwargs.update((k, self._cache(v)) for k, v in kw_value.items())
-            elif kw_value is not Undefined:
-                kwargs[kw.arg] = self._cache([kw_value])
-            else:
-                kwargs[kw.arg] = kw.value
-        args_mapping = map_parameters(parameters, args, kwargs)
-        return_name = self.name_generator()
-        self._inlining.extend(
-            ast.Assign(targets=[ast.Name(id=name, ctx=ast.Store())], value=arg_node)
-            for name, arg_node in args_mapping.items()
-        )
-        self._inlining.extend(
-            replace_return(stmt, return_name) for stmt in func_ast.body
-        )
-        return ast.Name(id=return_name, ctx=ast.Load())
+        if not self._enable_inlining or func in self._inline_guard:
+            return None
+        self._inline_guard.add(func)
+        try:
+            args, kwargs = args or [], kwargs or {}
+            for arg in node.args:
+                if isinstance(arg, ast.Starred):
+                    arg_value = self._get_value(arg.value)
+                    if arg_value is Undefined or not isinstance(arg_value, Collection):
+                        return None
+                    args.extend(map(self._cache, arg_value))
+                else:
+                    arg_value = self._get_value(arg)
+                    args.append(
+                        arg if arg_value is Undefined else self._cache(arg_value)
+                    )
+            for kw in node.keywords:
+                kw_value = self._get_value(kw.value)
+                if kw.arg is None:
+                    if kw_value is Undefined or not isinstance(kw_value, Mapping):
+                        return None
+                    kwargs.update((k, self._cache(v)) for k, v in kw_value.items())
+                elif kw_value is not Undefined:
+                    kwargs[kw.arg] = self._cache([kw_value])
+                else:
+                    kwargs[kw.arg] = kw.value
+            args_mapping = map_parameters(parameters, args, kwargs)
+            return_name = self.name_generator()
+            self._add_inlined(
+                ast.Assign(targets=[ast.Name(id=name, ctx=ast.Store())], value=arg_node)
+                for name, arg_node in args_mapping.items()
+            )
+            self._add_inlined(
+                replace_return(stmt, return_name) for stmt in func_ast.body
+            )
+            return ast.Name(id=return_name, ctx=ast.Load())
+        finally:
+            self._inline_guard.remove(func)
 
     def visit_Call(self, node: ast.Call) -> NodeTransformation:
         node.func, func = self._visit_value(node.func)
@@ -332,38 +345,38 @@ class Optimizer(ast.NodeTransformer):
             if self._cached_sub_expr and self.execute(func_or_method):
                 return self._cache(self._eval(node))
             else:
-                self._cached_sub_expr &= False
+                self._cached_sub_expr = False
             if self.inline(func_or_method):
-                try:
-                    func_ast = get_function_ast(func)
-                    if is_inlinable(func_ast):
-                        func_namespace = {**func.__globals__, **get_captured(func)}
-                        rename_mapping = rename(func_ast, self.name_generator)
-                        renamed_namespace = {
-                            renamed: func_namespace[name]
-                            for name, renamed in rename_mapping.items()
-                            if name in func_namespace
-                        }
-                        self._namespace.update(renamed_namespace)
-                        self._captured.update(renamed_namespace)
-                        parameters = [
-                            param.replace(
-                                name=rename_mapping[param.name],
-                                default=self._cache(param.default)
-                                if param.default is not inspect.Parameter.empty
-                                else inspect.Parameter.empty,
-                            )
-                            for param in inspect.signature(func).parameters.values()
-                        ]
-                        inlined = self._inline(node, func_ast, parameters, args, kwargs)
-                    else:
-                        raise ValueError
-                except Exception:
+                func_ast = copy.deepcopy(get_function_ast(func))
+                if is_inlinable(func_ast):
+                    func_namespace = {**func.__globals__, **get_captured(func)}
+                    rename_mapping = rename(func_ast, self.name_generator.replace)
+                    renamed_namespace = {
+                        renamed: func_namespace[name]
+                        for name, renamed in rename_mapping.items()
+                        if name in func_namespace
+                    }
+                    self._namespace.update(renamed_namespace)
+                    self._captured.update(renamed_namespace)
+                    parameters = [
+                        param.replace(
+                            name=rename_mapping[param.name],
+                            default=self._cache(param.default)
+                            if param.default is not inspect.Parameter.empty
+                            else inspect.Parameter.empty,
+                        )
+                        for param in inspect.signature(func).parameters.values()
+                    ]
+                    inlined = self._inline(
+                        func_or_method, node, func_ast, parameters, args, kwargs
+                    )
+                else:
                     warnings.warn(f"{func} cannot be inlined", UserWarning)
         elif isinstance(node.func, ast.Name) and node.func.id in self._functions:
-            func_ast = copy.deepcopy(self._functions[node.func.id])
-            rename(func_ast, self.name_generator, only_declared=True)
-            inlined = self._inline(node, func_ast, ast_parameters(func_ast))
+            local_func = self._functions[node.func.id]
+            func_ast = copy.deepcopy(local_func)
+            rename(func_ast, self.name_generator.replace, only_declared=True)
+            inlined = self._inline(local_func, node, func_ast, ast_parameters(func_ast))
         return inlined if inlined is not None else node
 
     def visit_Constant(self, node: ast.Constant) -> NodeTransformation:

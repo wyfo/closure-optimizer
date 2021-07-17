@@ -133,7 +133,7 @@ def test_rename():
         return _4(_2, _3, _6)
 
     renamed = get_function_ast(f)
-    assert rename(renamed, NameGenerator("_")) == {
+    assert rename(renamed, NameGenerator("_").replace) == {
         "f": "_1",
         "a": "_2",
         "b": "_3",
@@ -152,7 +152,7 @@ def test_rename():
         return _4(_2, _3, captured)
 
     renamed = get_function_ast(f)
-    assert rename(renamed, NameGenerator("_"), only_declared=True) == {
+    assert rename(renamed, NameGenerator("_").replace, only_declared=True) == {
         "f": "_1",
         "a": "_2",
         "b": "_3",

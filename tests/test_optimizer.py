@@ -256,3 +256,39 @@ def test_bool_op():
         return 0 + (1 and a) + (a and 0) + (0 or a) + 1 + (a or 1)
 
     assert_optimized(f, g, 0)
+
+
+def test_recursive_inlining():
+    def rec(i):
+        return rec(i - 1) if i > 0 else 0
+
+    def f(a):
+        def nested(i):
+            return nested(i - 1) if i > 0 else 0
+
+        return rec(0) + rec(a) + nested(0) + nested(a)
+
+    _rec = rec
+
+    def _nested(i):
+        return nested(i - 1) if i > 0 else 0
+
+    def g(a):
+        def nested(i):
+            return nested(i - 1) if i > 0 else 0
+
+        # rec(0)
+        _1 = 0
+        _2 = 0
+        # rec(a)
+        _3 = a
+        _4 = _rec(_3 - 1) if _3 > 0 else 0
+        # nested(0)
+        _5 = 0
+        _6 = 0
+        # nested(a)
+        _7 = a
+        _8 = _nested(_7 - 1) if _7 > 0 else 0
+        return 0 + _4 + 0 + _8
+
+    assert_optimized(optimize(f, inline={rec}), g, 0)

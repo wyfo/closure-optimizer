@@ -160,17 +160,20 @@ class NameGenerator:
         self._counter += 1
         return f"{self.prefix}{self._counter}"
 
+    def replace(self, _: str) -> str:
+        return self()
+
 
 class Renamer(ast.NodeVisitor):
-    def __init__(self, generate_name: Callable[[], str], only_declared: bool):
-        self.generate_name = generate_name
+    def __init__(self, renamer: Callable[[str], str], only_declared: bool):
+        self.generate_name = renamer
         self.only_declared = only_declared
         self._declared: Set[str] = set()
         self._mapping: Dict[str, str] = {}
 
     def _rename(self, name: str) -> str:
         if name not in self._mapping:
-            self._mapping[name] = self.generate_name()
+            self._mapping[name] = self.generate_name(name)
         return self._mapping[name]
 
     def visit_arg(self, node: ast.arg):
@@ -206,9 +209,21 @@ class Renamer(ast.NodeVisitor):
 
 
 def rename(
-    node: ast.AST, generate_name: Callable[[], str], *, only_declared: bool = False
+    node: ast.AST,
+    renaming: Union[Callable[[str], str], Mapping[str, str]],
+    *,
+    only_declared: bool = False,
 ) -> Mapping[str, str]:
-    renamer = Renamer(generate_name, only_declared)
+    if not callable(renaming):
+        mapping = renaming
+
+        def renaming(name: str) -> str:
+            try:
+                return mapping[name]
+            except KeyError:
+                return name
+
+    renamer = Renamer(cast(Callable[[str], str], renaming), only_declared)
     renamer.visit(node)
     return renamer._mapping
 
