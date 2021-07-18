@@ -366,3 +366,7 @@ def assigned_names(target: ast.expr) -> Optional[Collection[str]]:
     else:
         return None
     return result
+
+
+def ast_slice(value: ast.expr) -> ast.expr:
+    return ast.Index(value=value) if sys.version_info < (3, 9) else value  # type: ignore

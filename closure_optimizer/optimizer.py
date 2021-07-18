@@ -4,7 +4,6 @@ import copy
 import functools
 import inspect
 import itertools
-import sys
 import warnings
 from typing import (
     Any,
@@ -42,6 +41,7 @@ from closure_optimizer.utils import (
     assigned_names,
     assignments,
     ast_parameters,
+    ast_slice,
     flatten,
     get_captured,
     get_function_ast,
@@ -508,7 +508,11 @@ class Optimizer(ast.NodeTransformer):
             lambda node: (self.visit(node.key), self.visit(node.value)),
             flatten,
             lambda node, name: ast.Assign(
-                targets=[ast.Subscript(value=name, slice=node.key, ctx=ast.Store())],
+                targets=[
+                    ast.Subscript(
+                        value=name, slice=ast_slice(node.key), ctx=ast.Store()
+                    )
+                ],
                 value=node.value,
             ),
         )
@@ -679,11 +683,7 @@ def optimize(
                             targets=[ast.Name(id=var, ctx=ast.Store())],
                             value=ast.Subscript(
                                 value=ast.Name(id="captured", ctx=ast.Load()),
-                                slice=(
-                                    ast.Index(ast.Constant(value=var))
-                                    if sys.version_info < (3, 9)
-                                    else ast.Constant(value=var)
-                                ),
+                                slice=ast_slice(ast.Constant(value=var)),
                                 ctx=ast.Load(),
                             ),
                         )
