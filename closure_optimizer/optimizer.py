@@ -232,54 +232,6 @@ class Optimizer(ast.NodeTransformer):
                 self._namespace[name] = value
             self._functions.pop(name, ...)
 
-    def visit_Assign(self, node: ast.Assign) -> NodeTransformation:
-        node.value, value = self._visit_value(node.value)
-        for target in node.targets:
-            self._assign(target, value)
-        return node  # no need to call generic_visit because node.value is visited
-
-    def visit_AnnAssign(self, node: ast.AnnAssign) -> NodeTransformation:
-        if not hasattr(node, "value") or node.value is None:
-            return node
-        node.value, value = self._visit_value(node.value)
-        self._assign(node.target, value)
-        return node
-
-    def visit_Attribute(self, node: ast.Attribute) -> NodeTransformation:
-        node.value, value = self._visit_value(node.value)
-        inlined = None
-        if value is not Undefined and isinstance(node.ctx, ast.Load):
-            class_attr = getattr(value.__class__, node.attr, ...)
-            if isinstance(class_attr, property) and class_attr.fget is not None:
-                if self.execute(class_attr) or self.execute(class_attr.fget):
-                    return self._cache(self._eval(node))
-                elif self.inline(class_attr) or self.inline(class_attr.fget):
-                    inlined = self._inline_func(
-                        lambda: getattr(value, node.attr), class_attr.fget
-                    )
-            else:
-                return self._cache(self._eval(node))
-        return inlined if inlined else node
-
-    def visit_AugAssign(self, node: ast.AugAssign) -> NodeTransformation:
-        self._discard(node.target)
-        return self.generic_visit(node)
-
-    def visit_BoolOp(self, node: ast.BoolOp) -> NodeTransformation:
-        values = enumerate(node.values.copy())
-        for i, operand in values:
-            node.values[i], value = self._visit_value(operand)
-            if value is not Undefined:
-                if (isinstance(node.op, ast.And) and not value) or (
-                    isinstance(node.op, ast.Or) and value
-                ):
-                    return self.visit(node.values[i])
-            else:
-                break
-        for i, operand in values:
-            node.values[i] = self.visit(operand)
-        return node
-
     @contextlib.contextmanager
     def _disable_inlining(self):
         enable = self._enable_inlining
@@ -379,6 +331,54 @@ class Optimizer(ast.NodeTransformer):
         finally:
             self._inline_guard.remove(func)
 
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> NodeTransformation:
+        if not hasattr(node, "value") or node.value is None:
+            return node
+        node.value, value = self._visit_value(node.value)
+        self._assign(node.target, value)
+        return node
+
+    def visit_Assign(self, node: ast.Assign) -> NodeTransformation:
+        node.value, value = self._visit_value(node.value)
+        for target in node.targets:
+            self._assign(target, value)
+        return node  # no need to call generic_visit because node.value is visited
+
+    def visit_Attribute(self, node: ast.Attribute) -> NodeTransformation:
+        node.value, value = self._visit_value(node.value)
+        inlined = None
+        if value is not Undefined and isinstance(node.ctx, ast.Load):
+            class_attr = getattr(value.__class__, node.attr, ...)
+            if isinstance(class_attr, property) and class_attr.fget is not None:
+                if self.execute(class_attr) or self.execute(class_attr.fget):
+                    return self._cache(self._eval(node))
+                elif self.inline(class_attr) or self.inline(class_attr.fget):
+                    inlined = self._inline_func(
+                        lambda: getattr(value, node.attr), class_attr.fget
+                    )
+            else:
+                return self._cache(self._eval(node))
+        return inlined if inlined else node
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> NodeTransformation:
+        self._discard(node.target)
+        return self.generic_visit(node)
+
+    def visit_BoolOp(self, node: ast.BoolOp) -> NodeTransformation:
+        values = enumerate(node.values.copy())
+        for i, operand in values:
+            node.values[i], value = self._visit_value(operand)
+            if value is not Undefined:
+                if (isinstance(node.op, ast.And) and not value) or (
+                    isinstance(node.op, ast.Or) and value
+                ):
+                    return self.visit(node.values[i])
+            else:
+                break
+        for i, operand in values:
+            node.values[i] = self.visit(operand)
+        return node
+
     def visit_Call(self, node: ast.Call) -> NodeTransformation:
         for func_id, comp in [("list", ast.ListComp), ("set", ast.SetComp)]:
             if (
@@ -424,7 +424,8 @@ class Optimizer(ast.NodeTransformer):
                     k: self._cache(v) for k, v in func.keywords.items()
                 }
                 func = func.func
-            if hasattr(func, "__self__"):
+            # getattr.__self__ is builtin module
+            if hasattr(func, "__self__") and not inspect.ismodule(func.__self__):
                 func_or_method = getattr(type(func.__self__), func.__name__)
             else:
                 func_or_method = func
@@ -681,11 +682,13 @@ def optimize(
     skip: Collection[str] = (),
 ) -> Func:
     if isinstance(func, functools.partial):
-        params = inspect.signature(func.func).parameters.values()
+        params = inspect.signature(func.func, follow_wrapped=False).parameters.values()
         partial_args = map_parameters(params, func.args, func.keywords, partial=True)
         orig_func, func = func, func.func  # type: ignore
     else:
         orig_func, partial_args = None, {}  # type: ignore
+    # Retrieve ast first, in order to catch invalid function
+    func_ast = get_function_ast(func)
     captured = get_captured(func)
     captured.update(partial_args)
     inline_pred = as_predicate(inline)
@@ -700,7 +703,7 @@ def optimize(
         return is_builtin(f) or execute_pred(f)
 
     optimizer = Optimizer(func, captured, builtin_or_exec, inline_guard, skip)
-    optimized_ast = optimizer.visit(get_function_ast(func))
+    optimized_ast = optimizer.visit(func_ast)
     for key in partial_args:
         del captured[key]
     # Generating a function which instantiate a closure is the only way I've found to
@@ -737,9 +740,8 @@ def optimize(
         type_ignores=[],
     )
     ast.fix_missing_locations(factory)
-    compiled = compile(factory, "<ast>", "exec")
     localns: dict = {}
-    exec(compiled, func.__globals__, localns)  # type: ignore
+    exec(compile(factory, "<ast>", "exec"), func.__globals__, localns)  # type: ignore
     optimized_func = localns["factory"](captured)
     setattr(optimized_func, METADATA_ATTR, (optimized_ast, optimizer.skip))
     result = functools.wraps(func)(optimized_func)

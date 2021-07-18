@@ -418,9 +418,14 @@ def test_properties():
 
 
 def test_cache_function_default():
-    a = 0
+    a = (0, 1)
 
     def f(a=a):
         return a
 
-    assert optimize(f)() == 0
+    _1 = (0, 1)
+
+    def g(a=_1):
+        return a
+
+    assert_optimized(f, g)

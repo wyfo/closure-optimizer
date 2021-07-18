@@ -26,21 +26,21 @@ METADATA_ATTR = f"{PREFIX}ast"
 T = TypeVar("T")
 
 
-def get_function_ast(obj: Callable) -> ast.FunctionDef:
-    if obj.__name__ == "<lambda>":
+def get_function_ast(func: Callable) -> ast.FunctionDef:
+    if func.__name__ == "<lambda>":
         raise ValueError("Lambda are not supported")
-    if hasattr(obj, METADATA_ATTR):
-        return getattr(obj, METADATA_ATTR)[0]
-    while hasattr(obj, "__wrapped__"):
-        obj = obj.__wrapped__  # type: ignore
-    node = ast.parse(textwrap.dedent(inspect.getsource(obj))).body[0]
+    if hasattr(func, METADATA_ATTR):
+        return getattr(func, METADATA_ATTR)[0]
+    node = ast.parse(textwrap.dedent(inspect.getsource(func))).body[0]
     if not isinstance(node, ast.FunctionDef):
-        raise ValueError(f"Unsupported object {obj}")
+        raise ValueError(f"Unsupported object {func}")
     node.decorator_list = []
     return node
 
 
 def get_captured(func: Callable) -> Dict[str, Any]:
+    if not hasattr(func, "__closure__"):
+        return {}
     cells = [cell.cell_contents for cell in func.__closure__ or ()]  # type: ignore
     return dict(zip(func.__code__.co_freevars, cells))
 
