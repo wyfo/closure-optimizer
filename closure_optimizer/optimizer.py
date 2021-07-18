@@ -424,8 +424,12 @@ class Optimizer(ast.NodeTransformer):
                     k: self._cache(v) for k, v in func.keywords.items()
                 }
                 func = func.func
-            # getattr.__self__ is builtin module
-            if hasattr(func, "__self__") and not inspect.ismodule(func.__self__):
+            # getattr.__self__ is builtin module in CPython and None in PyPy3
+            if (
+                hasattr(func, "__self__")
+                and not inspect.ismodule(func.__self__)
+                and func.__self__ is not None
+            ):
                 func_or_method = getattr(type(func.__self__), func.__name__)
             else:
                 func_or_method = func
