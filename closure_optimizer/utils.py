@@ -207,7 +207,7 @@ class Renamer(ast.NodeVisitor):
 
     def visit_Name(self, node: ast.Name):
         if node.id in BUILTIN_NAMES:
-            return node
+            return
         if not self.only_declared:
             node.id = self._rename(node.id)
         elif isinstance(node.ctx, ast.Store):

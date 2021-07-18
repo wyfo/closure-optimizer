@@ -468,7 +468,7 @@ class Optimizer(ast.NodeTransformer):
                         if not keep_elt:
                             break
                     if keep_elt:
-                        flattened.append(visit(node))
+                        flattened.append(visit(copy.deepcopy(node)))
                     elif keep_elt is None:
                         break
                 finally:
@@ -476,7 +476,6 @@ class Optimizer(ast.NodeTransformer):
             else:
                 return flatten(flattened)
         name = self.name_generator()
-        variable = ast.Name(id=name, ctx=ast.Load())
         stmts: List[ast.stmt] = [
             ast.Assign(targets=[ast.Name(id=name, ctx=ast.Store())], value=flatten([]))
         ]
@@ -495,9 +494,9 @@ class Optimizer(ast.NodeTransformer):
                 ast_if = ast.If(test=if_expr, body=[], orelse=[])
                 body.append(ast_if)
                 body = ast_if.body
-        body.append(insert(node, variable))
+        body.append(insert(copy.deepcopy(node), ast.Name(id=name, ctx=ast.Load())))
         self._add_inlined(stmts)
-        return variable
+        return ast.Name(id=name, ctx=ast.Load())
 
     def visit_DictComp(self, node: ast.DictComp) -> NodeTransformation:
         def flatten(elts: Sequence[Tuple[ast.expr, ast.expr]]) -> ast.Dict:
@@ -506,10 +505,7 @@ class Optimizer(ast.NodeTransformer):
 
         return self._visit_comprehension(
             node,
-            lambda node: (
-                self.visit(copy.deepcopy(node.key)),
-                self.visit(copy.deepcopy(node.value)),
-            ),
+            lambda node: (self.visit(node.key), self.visit(node.value)),
             flatten,
             lambda node, name: ast.Assign(
                 targets=[ast.Subscript(value=name, slice=node.key, ctx=ast.Store())],
@@ -526,7 +522,9 @@ class Optimizer(ast.NodeTransformer):
             return self.generic_visit(node)
         stmts: List[ast.stmt] = []
         for elt in value:
-            stmts.append(ast.Assign(targets=[node.target], value=self._cache(elt)))
+            stmts.append(
+                ast.Assign(targets=[copy.deepcopy(node.target)], value=self._cache(elt))
+            )
             stmts.extend(copy.deepcopy(node.body))
         return self._visit_and_flatten(stmts)
 
@@ -572,7 +570,7 @@ class Optimizer(ast.NodeTransformer):
     def visit_ListComp(self, node: ast.ListComp) -> NodeTransformation:
         return self._visit_comprehension(
             node,
-            lambda node: self.visit(copy.deepcopy(node.elt)),
+            lambda node: self.visit(node.elt),
             lambda elts: ast.List(elts=elts, ctx=ast.Load()),
             lambda node, name: ast.Expr(
                 value=ast.Call(
@@ -608,7 +606,7 @@ class Optimizer(ast.NodeTransformer):
     def visit_SetComp(self, node: ast.SetComp) -> NodeTransformation:
         return self._visit_comprehension(
             node,
-            lambda node: self.visit(copy.deepcopy(node.elt)),
+            lambda node: self.visit(node.elt),
             lambda elts: ast.Set(elts=elts, ctx=ast.Load()),
             lambda node, name: ast.Expr(
                 value=ast.Call(
