@@ -192,7 +192,11 @@ class Optimizer(ast.NodeTransformer):
             result = super().generic_visit(node)
             assert isinstance(result, ast.expr)
             if self._cached_sub_expr:
-                return self._cache(self._eval(result))
+                value = self._eval(result)
+                if value in BUILTINS:
+                    return ast.Name(id=value.__name__, ctx=ast.Load())
+                else:
+                    return self._cache(value)
         if isinstance(node, ast.stmt):
             self._scopes.append(set())
             try:
@@ -595,6 +599,8 @@ class Optimizer(ast.NodeTransformer):
                 value = self._namespace[node.id]
                 if value.__class__ in CONSTANT_NODE_BY_TYPE:
                     return CONSTANT_NODE_BY_TYPE[value.__class__](value)
+                elif value in BUILTINS:
+                    return ast.Name(id=value.__name__, ctx=ast.Load())
             else:
                 self._cached_sub_expr &= node.id in BUILTIN_NAMES
         return node

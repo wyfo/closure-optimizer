@@ -1,5 +1,6 @@
 # flake8: noqa
 import functools
+import types
 
 from closure_optimizer import optimize
 from closure_optimizer.utils import get_skipped
@@ -377,6 +378,19 @@ def test_list_map():
 
     assert_optimized(f, g, (0, 1))
     assert_optimized(functools.partial(f, (0, 1)), h)
+
+
+def test_use_builtin_when_captured():
+    a = abs
+    b = types.SimpleNamespace(a=abs)
+
+    def f(arg):
+        return a(arg) + (b.a or arg)(arg)
+
+    def g(arg):
+        return abs(arg) + abs(arg)
+
+    assert_optimized(f, g, 0)
 
 
 def test_cache_function_default():
