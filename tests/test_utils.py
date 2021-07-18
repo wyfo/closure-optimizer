@@ -115,7 +115,7 @@ def test_rename():
     captured = ...
 
     def f(a):
-        b = a
+        b = abs(a)
 
         def closure(*arg):
             return arg
@@ -125,7 +125,7 @@ def test_rename():
     _6 = ...
 
     def _1(_2):
-        _3 = _2
+        _3 = abs(_2)
 
         def _4(*_5):
             return _5
@@ -144,7 +144,7 @@ def test_rename():
     assert compare_ast(renamed, get_function_ast(_1))
 
     def _1(_2):
-        _3 = _2
+        _3 = abs(_2)
 
         def _4(*_5):
             return _5

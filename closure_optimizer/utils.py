@@ -19,7 +19,7 @@ from typing import (
     cast,
 )
 
-from closure_optimizer.constants import PREFIX
+from closure_optimizer.constants import BUILTIN_NAMES, PREFIX
 
 METADATA_ATTR = f"{PREFIX}ast"
 
@@ -206,6 +206,8 @@ class Renamer(ast.NodeVisitor):
         raise NotImplementedError
 
     def visit_Name(self, node: ast.Name):
+        if node.id in BUILTIN_NAMES:
+            return node
         if not self.only_declared:
             node.id = self._rename(node.id)
         elif isinstance(node.ctx, ast.Store):
