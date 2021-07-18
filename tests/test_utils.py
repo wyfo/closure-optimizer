@@ -160,3 +160,36 @@ def test_rename():
         "arg": "_5",
     }
     assert compare_ast(renamed, get_function_ast(_1))
+
+
+def test_normalization():
+    def f(a, b, c, d, e):
+        if a:
+            return
+        else:
+            a = ...
+        if b:
+            ...
+        elif c:
+            return
+        for _ in d:
+            if e:
+                continue
+            e = ...
+
+    def g(a, b, c, d, e):
+        if a:
+            return
+        else:
+            a = ...
+            if b:
+                ...
+            elif c:
+                return
+        for _ in d:
+            if e:
+                pass
+            else:
+                e = ...
+
+    assert compare_func_body(f, g)

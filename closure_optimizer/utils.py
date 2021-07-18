@@ -9,6 +9,7 @@ from typing import (
     Dict,
     Iterable,
     Iterator,
+    List,
     Mapping,
     Optional,
     Sequence,
@@ -26,6 +27,31 @@ METADATA_ATTR = f"{PREFIX}ast"
 T = TypeVar("T")
 
 
+class Normalizer(ast.NodeVisitor):
+    def _normalize(self, stmts: List[ast.stmt], escape: type, trim: bool):
+        for index, stmt in enumerate(stmts):
+            if (
+                isinstance(stmt, ast.If)
+                and stmt.body
+                and isinstance(stmt.body[-1], escape)
+            ):
+                new_if = ast.If(
+                    test=stmt.test,
+                    body=(stmt.body[:-1] or [ast.Pass()]) if trim else stmt.body,
+                    orelse=stmt.orelse + stmts[index + 1 :],
+                )
+                stmts[index:] = [new_if]
+                self._normalize(new_if.orelse, escape, trim)
+
+    def visit_For(self, node: ast.For):
+        self.generic_visit(node)
+        self._normalize(node.body, ast.Continue, trim=True)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef):
+        self.generic_visit(node)
+        self._normalize(node.body, ast.Return, trim=False)
+
+
 def get_function_ast(func: Callable) -> ast.FunctionDef:
     if func.__name__ == "<lambda>":
         raise ValueError("Lambda are not supported")
@@ -35,6 +61,7 @@ def get_function_ast(func: Callable) -> ast.FunctionDef:
     if not isinstance(node, ast.FunctionDef):
         raise ValueError(f"Unsupported object {func}")
     node.decorator_list = []
+    Normalizer().visit(node)
     return node
 
 
