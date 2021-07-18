@@ -253,7 +253,7 @@ class Optimizer(ast.NodeTransformer):
                 if (isinstance(node.op, ast.And) and not value) or (
                     isinstance(node.op, ast.Or) and value
                 ):
-                    return node.values[i]
+                    return self.visit(node.values[i])
             else:
                 break
         for i, operand in values:
