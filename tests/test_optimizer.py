@@ -377,3 +377,12 @@ def test_list_map():
 
     assert_optimized(f, g, (0, 1))
     assert_optimized(functools.partial(f, (0, 1)), h)
+
+
+def test_cache_function_default():
+    a = 0
+
+    def f(a=a):
+        return a
+
+    assert optimize(f)() == 0

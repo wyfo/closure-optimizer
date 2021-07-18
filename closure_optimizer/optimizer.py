@@ -75,13 +75,14 @@ Comp = TypeVar("Comp", bound=Comprehension)
 class Optimizer(ast.NodeTransformer):
     def __init__(
         self,
-        globalns: Mapping[str, Any],
+        func: Callable,
         captured: Dict[str, Any],
         execute: Predicate[Callable],
         inline: Predicate[Callable],
         skip: Collection[str],
     ):
         self.execute = execute
+        self.func = func
         self.inline = inline
         self.name_generator = NameGenerator(PREFIX)
         self.skip = set(skip)
@@ -93,7 +94,7 @@ class Optimizer(ast.NodeTransformer):
         self._inlined: List[ast.stmt] = []
         self._inline_guard: Set[str] = set()
         self._main_function = False
-        self._namespace: Dict[str, Any] = {**globalns, **captured}
+        self._namespace: Dict[str, Any] = {**func.__globals__, **captured}  # type: ignore
         self._substitution: Dict[str, Any] = {}
         self._scopes: List[Set[str]] = []
         for exc in skip:
@@ -532,6 +533,10 @@ class Optimizer(ast.NodeTransformer):
     def visit_FunctionDef(self, node: ast.FunctionDef) -> NodeTransformation:
         if not self._main_function:
             self._main_function = True
+            node.args.defaults[:] = list(map(self._cache, self.func.__defaults__ or ()))  # type: ignore
+            node.args.kw_defaults[:] = list(
+                map(self._cache, (self.func.__kwdefaults__ or {}).values())  # type: ignore
+            )
             return self.generic_visit(node)
         else:
             self._functions[node.name] = node
@@ -653,9 +658,7 @@ def optimize(
     def builtin_or_exec(f: Callable):
         return is_builtin(f) or execute_pred(f)
 
-    optimizer = Optimizer(
-        func.__globals__, captured, builtin_or_exec, inline_guard, skip  # type: ignore
-    )
+    optimizer = Optimizer(func, captured, builtin_or_exec, inline_guard, skip)
     optimized_ast = optimizer.visit(get_function_ast(func))
     for key in partial_args:
         del captured[key]
