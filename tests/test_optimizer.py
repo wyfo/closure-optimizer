@@ -429,3 +429,15 @@ def test_cache_function_default():
         return a
 
     assert_optimized(f, g)
+
+
+def test_optimize_gettatr():
+    attr = "attr"
+
+    def f(obj):
+        return getattr(obj, attr)
+
+    def g(obj):
+        return obj.attr
+
+    assert_optimized(f, g, types.SimpleNamespace(attr=0))

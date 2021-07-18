@@ -381,11 +381,11 @@ class Optimizer(ast.NodeTransformer):
 
     def visit_Call(self, node: ast.Call) -> NodeTransformation:
         for func_id, comp in [("list", ast.ListComp), ("set", ast.SetComp)]:
+            # Cannot use func, because list/set are not part of evaluable builtins
             if (
                 isinstance(node.func, ast.Name)
                 and node.func.id == func_id
                 and node.args
-                and not node.keywords
             ):
                 arg, *_ = node.args
                 if (
@@ -416,6 +416,12 @@ class Optimizer(ast.NodeTransformer):
         # https://foss.heptapod.net/pypy/pypy/-/issues/3440
         node.args[:] = list(map(self.visit, node.args))
         node.keywords[:] = list(map(self.visit, node.keywords))
+        if func == getattr and len(node.args) == 2:
+            attr = self._get_value(node.args[1])
+            if isinstance(attr, str):
+                return self.visit(
+                    ast.Attribute(value=node.args[0], attr=attr, ctx=ast.Load())
+                )
         inlined = None
         if func is not Undefined:
             partial_args = None
@@ -607,6 +613,7 @@ class Optimizer(ast.NodeTransformer):
 
     def visit_Lambda(self, node: ast.Lambda) -> NodeTransformation:
         node.args = self.visit(node.args)
+        self._cached_sub_expr = False
         return node
 
     def visit_List(self, node: ast.List) -> NodeTransformation:
