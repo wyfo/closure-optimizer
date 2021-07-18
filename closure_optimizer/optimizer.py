@@ -66,7 +66,7 @@ is_builtin = as_predicate(BUILTINS)
 
 Node = TypeVar("Node", bound=ast.AST)
 T = TypeVar("T")
-Method = TypeVar("Method", bound=Callable[["Optimizer", ast.AST], NodeTransformation])
+FuncOrProp = Union[Callable, property]
 
 Comprehension = Union[ast.DictComp, ast.ListComp, ast.SetComp]
 Comp = TypeVar("Comp", bound=Comprehension)
@@ -77,8 +77,8 @@ class Optimizer(ast.NodeTransformer):
         self,
         func: Callable,
         captured: Dict[str, Any],
-        execute: Predicate[Callable],
-        inline: Predicate[Callable],
+        execute: Predicate[FuncOrProp],
+        inline: Predicate[FuncOrProp],
         skip: Collection[str],
     ):
         self.execute = execute
@@ -245,6 +245,22 @@ class Optimizer(ast.NodeTransformer):
         self._assign(node.target, value)
         return node
 
+    def visit_Attribute(self, node: ast.Attribute) -> NodeTransformation:
+        node.value, value = self._visit_value(node.value)
+        inlined = None
+        if value is not Undefined and isinstance(node.ctx, ast.Load):
+            class_attr = getattr(value.__class__, node.attr, ...)
+            if isinstance(class_attr, property) and class_attr.fget is not None:
+                if self.execute(class_attr) or self.execute(class_attr.fget):
+                    return self._cache(self._eval(node))
+                elif self.inline(class_attr) or self.inline(class_attr.fget):
+                    inlined = self._inline_func(
+                        lambda: getattr(value, node.attr), class_attr.fget
+                    )
+            else:
+                return self._cache(self._eval(node))
+        return inlined if inlined else node
+
     def visit_AugAssign(self, node: ast.AugAssign) -> NodeTransformation:
         self._discard(node.target)
         return self.generic_visit(node)
@@ -273,42 +289,84 @@ class Optimizer(ast.NodeTransformer):
         finally:
             self._enable_inlining = enable
 
+    def _inline_func(
+        self,
+        func: Callable,
+        func_or_method: Callable,
+        args: Sequence[ast.expr] = (),
+        keywords: Sequence[ast.keyword] = (),
+        partial_args: Tuple[List[Any], Dict[str, Any]] = None,
+    ) -> Optional[ast.Name]:
+        func_ast = copy.deepcopy(get_function_ast(func_or_method))
+        if is_inlinable(func_ast):
+            func_namespace = {
+                **func_or_method.__globals__,  # type: ignore
+                **get_captured(func_or_method),
+            }
+            rename_mapping = rename(func_ast, self.name_generator.replace)
+            skipped = get_skipped(func_or_method)
+            renamed_namespace = {
+                renamed: func_namespace[name]
+                for name, renamed in rename_mapping.items()
+                if name in func_namespace and name not in skipped
+            }
+            self.skip.update(rename_mapping[name] for name in skipped)
+            self._namespace.update(renamed_namespace)
+            self._captured.update(renamed_namespace)
+            parameters = [
+                param.replace(
+                    name=rename_mapping[param.name],
+                    default=self._cache(param.default)
+                    if param.default is not inspect.Parameter.empty
+                    else inspect.Parameter.empty,
+                )
+                for param in inspect.signature(
+                    func, follow_wrapped=False
+                ).parameters.values()
+            ]
+            return self._inline(
+                func_or_method, func_ast, parameters, args, keywords, partial_args
+            )
+        else:
+            warnings.warn(f"{func_or_method} cannot be inlined", UserWarning)
+            return None
+
     def _inline(
         self,
         func: Any,
-        node: ast.Call,
         func_ast: ast.FunctionDef,
         parameters: Iterable[inspect.Parameter],
-        args: List[ast.expr] = None,
-        kwargs: Dict[str, ast.expr] = None,
+        args: Sequence[ast.expr],
+        keywords: Sequence[ast.keyword],
+        partial_args: Tuple[List[ast.expr], Dict[str, ast.expr]] = None,
     ) -> Optional[ast.Name]:
         if not self._enable_inlining or func in self._inline_guard:
             return None
         self._inline_guard.add(func)
         try:
-            args, kwargs = args or [], kwargs or {}
-            for arg in node.args:
+            func_args, func_kwargs = partial_args or ([], {})
+            for arg in args:
                 if isinstance(arg, ast.Starred):
                     arg_value = self._get_value(arg.value)
                     if arg_value is Undefined or not isinstance(arg_value, Collection):
                         return None
-                    args.extend(map(self._cache, arg_value))
+                    func_args.extend(map(self._cache, arg_value))
                 else:
                     arg_value = self._get_value(arg)
-                    args.append(
+                    func_args.append(
                         arg if arg_value is Undefined else self._cache(arg_value)
                     )
-            for kw in node.keywords:
+            for kw in keywords:
                 kw_value = self._get_value(kw.value)
                 if kw.arg is None:
                     if kw_value is Undefined or not isinstance(kw_value, Mapping):
                         return None
-                    kwargs.update((k, self._cache(v)) for k, v in kw_value.items())
+                    func_kwargs.update((k, self._cache(v)) for k, v in kw_value.items())
                 elif kw_value is not Undefined:
-                    kwargs[kw.arg] = self._cache([kw_value])
+                    func_kwargs[kw.arg] = self._cache([kw_value])
                 else:
-                    kwargs[kw.arg] = kw.value
-            args_mapping = map_parameters(parameters, args, kwargs)
+                    func_kwargs[kw.arg] = kw.value
+            args_mapping = map_parameters(parameters, func_args, func_kwargs)
             return_name = self.name_generator()
             self._add_inlined(
                 ast.Assign(targets=[ast.Name(id=name, ctx=ast.Store())], value=arg_node)
@@ -360,11 +418,11 @@ class Optimizer(ast.NodeTransformer):
         node.keywords[:] = list(map(self.visit, node.keywords))
         inlined = None
         if func is not Undefined:
-            args: List[ast.expr] = []
-            kwargs: Dict[str, ast.expr] = {}
+            partial_args = None
             if isinstance(func, functools.partial):
-                args.extend(map(self._cache, func.args))
-                kwargs.update((k, self._cache(v)) for k, v in func.keywords.items())
+                partial_args = list(map(self._cache, func.args)), {
+                    k: self._cache(v) for k, v in func.keywords.items()
+                }
                 func = func.func
             if hasattr(func, "__self__"):
                 func_or_method = getattr(type(func.__self__), func.__name__)
@@ -375,41 +433,16 @@ class Optimizer(ast.NodeTransformer):
             else:
                 self._cached_sub_expr = False
             if self.inline(func_or_method):
-                func_ast = copy.deepcopy(get_function_ast(func))
-                if is_inlinable(func_ast):
-                    func_namespace = {
-                        **func.__globals__,
-                        **get_captured(func_or_method),
-                    }
-                    rename_mapping = rename(func_ast, self.name_generator.replace)
-                    skipped = get_skipped(func_or_method)
-                    renamed_namespace = {
-                        renamed: func_namespace[name]
-                        for name, renamed in rename_mapping.items()
-                        if name in func_namespace and name not in skipped
-                    }
-                    self.skip.update(rename_mapping[name] for name in skipped)
-                    self._namespace.update(renamed_namespace)
-                    self._captured.update(renamed_namespace)
-                    parameters = [
-                        param.replace(
-                            name=rename_mapping[param.name],
-                            default=self._cache(param.default)
-                            if param.default is not inspect.Parameter.empty
-                            else inspect.Parameter.empty,
-                        )
-                        for param in inspect.signature(func).parameters.values()
-                    ]
-                    inlined = self._inline(
-                        func_or_method, node, func_ast, parameters, args, kwargs
-                    )
-                else:
-                    warnings.warn(f"{func} cannot be inlined", UserWarning)
+                inlined = self._inline_func(
+                    func, func_or_method, node.args, node.keywords, partial_args
+                )
         elif isinstance(node.func, ast.Name) and node.func.id in self._functions:
             local_func = self._functions[node.func.id]
             func_ast = copy.deepcopy(local_func)
             rename(func_ast, self.name_generator.replace, only_declared=True)
-            inlined = self._inline(local_func, node, func_ast, ast_parameters(func_ast))
+            inlined = self._inline(
+                local_func, func_ast, ast_parameters(func_ast), node.args, node.keywords
+            )
         return inlined if inlined is not None else node
 
     def visit_Constant(self, node: ast.Constant) -> NodeTransformation:
@@ -635,15 +668,15 @@ class Optimizer(ast.NodeTransformer):
 Func = TypeVar("Func", bound=Callable)
 
 
-def is_optimized(func: Callable) -> bool:
-    return hasattr(func, METADATA_ATTR)
+def is_optimized(obj: Any) -> bool:
+    return hasattr(obj, METADATA_ATTR)
 
 
 def optimize(
     func: Func,
     *,
-    execute: IterableOrPredicate[Callable] = (),
-    inline: IterableOrPredicate[Callable] = (),
+    execute: IterableOrPredicate[FuncOrProp] = (),
+    inline: IterableOrPredicate[FuncOrProp] = (),
     inline_optimized: bool = True,
     skip: Collection[str] = (),
 ) -> Func:
@@ -658,12 +691,12 @@ def optimize(
     inline_pred = as_predicate(inline)
     execute_pred = as_predicate(execute)
 
-    def inline_guard(f: Callable) -> bool:
+    def inline_guard(f: FuncOrProp) -> bool:
         if isinstance(f, functools.partial):
             f = f.func
         return f != func and (inline_pred(f) or (inline_optimized and is_optimized(f)))
 
-    def builtin_or_exec(f: Callable):
+    def builtin_or_exec(f: FuncOrProp):
         return is_builtin(f) or execute_pred(f)
 
     optimizer = Optimizer(func, captured, builtin_or_exec, inline_guard, skip)

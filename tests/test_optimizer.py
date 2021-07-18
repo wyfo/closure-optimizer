@@ -393,6 +393,30 @@ def test_use_builtin_when_captured():
     assert_optimized(f, g, 0)
 
 
+def test_properties():
+    class A:
+        @property
+        def zero(self):
+            return 0
+
+    a = A()
+
+    def f():
+        return a.zero
+
+    def g():
+        return 0
+
+    def h():
+        _1 = 0
+        return _1
+
+    assert_optimized(optimize(f, execute={A.zero}), g)
+    assert_optimized(optimize(f, execute={A.zero.fget}), g)
+    assert_optimized(optimize(f, inline={A.zero}), h)
+    assert_optimized(optimize(f, inline={A.zero.fget}), h)
+
+
 def test_cache_function_default():
     a = 0
 
