@@ -317,6 +317,37 @@ class Optimizer(ast.NodeTransformer):
             self._inline_guard.remove(func)
 
     def visit_Call(self, node: ast.Call) -> NodeTransformation:
+        for func_id, comp in [("list", ast.ListComp), ("set", ast.SetComp)]:
+            if (
+                isinstance(node.func, ast.Name)
+                and node.func.id == func_id
+                and node.args
+                and not node.keywords
+            ):
+                arg, *_ = node.args
+                if (
+                    isinstance(arg, ast.Call)
+                    and isinstance(arg.func, ast.Name)
+                    and arg.func.id == "map"
+                    and not isinstance(arg.args[0], ast.Lambda)
+                ):
+                    return self.visit(
+                        comp(
+                            elt=ast.Call(
+                                func=arg.args[0],
+                                args=[ast.Name(id="_", ctx=ast.Load())],
+                                keywords=[],
+                            ),
+                            generators=[
+                                ast.comprehension(
+                                    target=ast.Name(id="_", ctx=ast.Store()),
+                                    iter=arg.args[1],
+                                    ifs=[],
+                                )
+                            ],
+                        )
+                    )
+
         node.func, func = self._visit_value(node.func)
         # Use list(map(...)) instead of only map because of pypy issue
         # https://foss.heptapod.net/pypy/pypy/-/issues/3440

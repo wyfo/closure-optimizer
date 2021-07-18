@@ -34,12 +34,6 @@ def test_does_not_evaluate_skipped():
     def f():
         return eval("42") + (a + 0)
 
-    import ast
-    import closure_optimizer.utils
-
-    print()
-    print(ast.dump(closure_optimizer.utils.get_function_ast(f)))
-    print(ast.dump(closure_optimizer.utils.get_function_ast(optimize(f, skip={"a"}))))
     assert_optimized(optimize(f, skip={"a"}), f)
 
 
@@ -361,3 +355,25 @@ def test_skip_is_preserved_in_inlined_optimized():
         return _3
 
     assert_optimized(h, i)
+
+
+def test_list_map():
+    def f(a):
+        l = list(())
+        return list(map(int, a))
+
+    _1 = ()
+
+    def g(a):
+        l = list(_1)
+        _2 = []
+        for _3 in a:
+            _2.append(int(_3))
+        return _2
+
+    def h(a):
+        l = list(_1)
+        return [0, 1]
+
+    assert_optimized(f, g, (0, 1))
+    assert_optimized(functools.partial(f, (0, 1)), h)
