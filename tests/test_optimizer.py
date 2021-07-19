@@ -441,3 +441,22 @@ def test_optimize_gettatr():
         return obj.attr
 
     assert_optimized(f, g, types.SimpleNamespace(attr=0))
+
+
+def test_functools_wraps():
+    a = 0
+
+    def tmp():
+        return a
+
+    optimized = optimize(tmp)
+
+    @functools.wraps(tmp)
+    def f():
+        return optimized()
+
+    def g():
+        _1 = 0
+        return _1
+
+    assert_optimized(f, g)

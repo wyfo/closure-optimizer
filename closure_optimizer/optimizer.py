@@ -744,7 +744,7 @@ def optimize(
                         for var in captured
                     ),
                     optimized_ast,
-                    ast.Return(value=ast.Name(id=func.__name__, ctx=ast.Load())),
+                    ast.Return(value=ast.Name(id=func_ast.name, ctx=ast.Load())),
                 ],
                 decorator_list=[],
             )

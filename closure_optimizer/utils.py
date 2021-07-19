@@ -53,12 +53,18 @@ class Normalizer(ast.NodeVisitor):
         self._normalize(node.body, ast.Return, trim=False)
 
 
+def get_source(func: Callable) -> str:
+    # Cannot use inspect.getsource because of wrapped functions
+    source, line = inspect.findsource(func)
+    return textwrap.dedent("".join(inspect.getblock(source[line:])))
+
+
 def get_function_ast(func: Callable) -> ast.FunctionDef:
     if func.__name__ == "<lambda>":
         raise ValueError("Lambda are not supported")
     if hasattr(func, METADATA_ATTR):
         return getattr(func, METADATA_ATTR)[0]
-    node = ast.parse(textwrap.dedent(inspect.getsource(func))).body[0]
+    node = ast.parse(get_source(func)).body[0]
     if not isinstance(node, ast.FunctionDef):
         raise ValueError(f"Unsupported object {func}")
     node.decorator_list = []
