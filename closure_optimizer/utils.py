@@ -1,4 +1,5 @@
 import ast
+import functools
 import inspect
 import sys
 import textwrap
@@ -20,7 +21,7 @@ from typing import (
     cast,
 )
 
-from closure_optimizer.constants import BUILTIN_NAMES, PREFIX
+from closure_optimizer.constants import PREFIX
 
 METADATA_ATTR = f"{PREFIX}ast"
 
@@ -198,6 +199,16 @@ class NameGenerator:
         return self()
 
 
+@functools.lru_cache()
+def is_builtin_name(name: str):
+    try:
+        eval(name)
+    except NameError:
+        return False
+    else:
+        return True
+
+
 class Renamer(ast.NodeVisitor):
     def __init__(self, renamer: Callable[[str], str], only_declared: bool):
         self.generate_name = renamer
@@ -233,7 +244,7 @@ class Renamer(ast.NodeVisitor):
         raise NotImplementedError
 
     def visit_Name(self, node: ast.Name):
-        if node.id in BUILTIN_NAMES:
+        if is_builtin_name(node.id):
             return
         if not self.only_declared:
             node.id = self._rename(node.id)
