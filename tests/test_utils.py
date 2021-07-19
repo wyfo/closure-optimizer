@@ -7,6 +7,7 @@ from closure_optimizer.utils import (
     NameGenerator,
     ast_parameters,
     get_function_ast,
+    is_inlinable,
     is_unrollable,
     map_parameters,
     rename,
@@ -90,25 +91,85 @@ def test_compare_func(other_func, expected, monkeypatch):
     assert compare_func_body(func1, other_func) == expected
 
 
-def for_loops():
-    for _ in ():
-        ...
-    for _ in ():
-        break
-    for _ in ():
-        continue
-    for _ in ():
-        ...
-    else:
-        ...
-
-
 def test_is_pure_for_loop():
+    def for_loops():
+        for _ in ():
+            ...
+        for _ in ():
+            break
+        for _ in ():
+            continue
+        for _ in ():
+            ...
+        else:
+            ...
+
     pure, with_break, with_continue, with_else = get_function_ast(for_loops).body
     assert is_unrollable(pure)
     assert not is_unrollable(with_break)
     assert not is_unrollable(with_continue)
     assert not is_unrollable(with_else)
+
+
+def test_inlinable():
+    def f():
+        pass
+
+    assert is_inlinable(get_function_ast(f))
+
+    def f():
+        global test_inlinable
+
+    assert not is_inlinable(get_function_ast(f))
+
+    def f():
+        nonlocal f
+
+    assert not is_inlinable(get_function_ast(f))
+
+    def f():
+        for _ in ...:
+            return
+
+    assert not is_inlinable(get_function_ast(f))
+
+    def f():
+        while ...:
+            return
+
+    assert not is_inlinable(get_function_ast(f))
+
+    def f():
+        with ...:
+            return
+
+    assert not is_inlinable(get_function_ast(f))
+
+    def f():
+        if ...:
+            return
+
+    assert not is_inlinable(get_function_ast(f))
+
+    def f():
+        if ...:
+            ...
+        else:
+            return
+
+    assert not is_inlinable(get_function_ast(f))
+
+    def f():
+        if ...:
+            ...
+        else:
+            ...
+        if ...:
+            return
+        else:
+            return
+
+    assert is_inlinable(get_function_ast(f))
 
 
 def test_rename():

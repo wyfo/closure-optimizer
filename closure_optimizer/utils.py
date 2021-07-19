@@ -308,9 +308,9 @@ class InlinableChecker(ast.NodeVisitor):
             for stmt in stmts:
                 self.visit(stmt)
         except Return:
-            return False
-        else:
             return True
+        else:
+            return False
 
     def visit_If(self, node: ast.If):
         if self._does_return(node.body) != self._does_return(node.orelse):
@@ -322,7 +322,7 @@ def is_inlinable(node: ast.AST) -> bool:
         InlinableChecker().visit(node)
     except Return:
         return True
-    except NotUnrollable:
+    except NotInlinable:
         return False
     else:
         return True
