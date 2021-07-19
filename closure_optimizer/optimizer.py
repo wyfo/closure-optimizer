@@ -229,8 +229,9 @@ class Optimizer(ast.NodeTransformer):
                 self._namespace.pop(name, ...)
             else:
                 self._scopes[-1].add(name)
-                self._namespace[name] = value
+                self._namespace[name] = val
             self._functions.pop(name, ...)
+        return self.visit(target)
 
     @contextlib.contextmanager
     def _disable_inlining(self):
@@ -335,13 +336,13 @@ class Optimizer(ast.NodeTransformer):
         if not hasattr(node, "value") or node.value is None:
             return node
         node.value, value = self._visit_value(node.value)
-        self._assign(node.target, value)
+        node.target = self._assign(node.target, value)
         return node
 
     def visit_Assign(self, node: ast.Assign) -> NodeTransformation:
         node.value, value = self._visit_value(node.value)
-        for target in node.targets:
-            self._assign(target, value)
+        for i, target in enumerate(node.targets):
+            node.targets[i] = self._assign(target, value)
         return node  # no need to call generic_visit because node.value is visited
 
     def visit_Attribute(self, node: ast.Attribute) -> NodeTransformation:
