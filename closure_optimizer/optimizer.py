@@ -378,7 +378,7 @@ class Optimizer(ast.NodeTransformer):
                 break
         for i, operand in values:
             node.values[i] = self.visit(operand)
-        return node
+        return self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> NodeTransformation:
         for func_id, comp in [("list", ast.ListComp), ("set", ast.SetComp)]:
