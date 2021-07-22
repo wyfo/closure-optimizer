@@ -2,6 +2,8 @@
 import functools
 import types
 
+import pytest
+
 from closure_optimizer import optimize
 from closure_optimizer.utils import get_skipped
 from tests.utils import assert_optimized
@@ -443,7 +445,8 @@ def test_optimize_gettatr():
     assert_optimized(f, g, types.SimpleNamespace(attr=0))
 
 
-def test_functools_wraps():
+@pytest.mark.parametrize("wraps_optimized", [False, True])
+def test_functools_wraps(wraps_optimized):
     a = 0
 
     def tmp():
@@ -451,7 +454,7 @@ def test_functools_wraps():
 
     optimized = optimize(tmp)
 
-    @functools.wraps(tmp)
+    @functools.wraps(optimized if wraps_optimized else tmp)
     def f():
         return optimized()
 

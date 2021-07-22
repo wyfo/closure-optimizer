@@ -24,6 +24,15 @@ from typing import (
 from closure_optimizer.constants import PREFIX
 
 METADATA_ATTR = f"{PREFIX}ast"
+GENERATED_FILENAME = f"<{PREFIX}ast>"
+
+
+def is_optimized(obj: Any) -> bool:
+    return (
+        hasattr(obj, METADATA_ATTR)
+        and getattr(obj, "__code__").co_filename == GENERATED_FILENAME
+    )
+
 
 T = TypeVar("T")
 
@@ -62,7 +71,7 @@ def get_source(func: Callable) -> str:
 def get_function_ast(func: Callable) -> ast.FunctionDef:
     if func.__name__ == "<lambda>":
         raise ValueError("Lambda are not supported")
-    if hasattr(func, METADATA_ATTR):
+    if is_optimized(func):
         return getattr(func, METADATA_ATTR)[0]
     node = ast.parse(get_source(func)).body[0]
     if not isinstance(node, ast.FunctionDef):

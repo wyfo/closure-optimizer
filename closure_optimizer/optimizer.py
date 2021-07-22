@@ -31,6 +31,7 @@ from closure_optimizer.constants import (
     PREFIX,
 )
 from closure_optimizer.utils import (
+    GENERATED_FILENAME,
     IterableOrPredicate,
     METADATA_ATTR,
     NameGenerator,
@@ -47,6 +48,7 @@ from closure_optimizer.utils import (
     get_function_ast,
     get_skipped,
     is_inlinable,
+    is_optimized,
     is_unrollable,
     map_parameters,
     rename,
@@ -681,10 +683,6 @@ class Optimizer(ast.NodeTransformer):
 Func = TypeVar("Func", bound=Callable)
 
 
-def is_optimized(obj: Any) -> bool:
-    return hasattr(obj, METADATA_ATTR)
-
-
 def optimize(
     func: Func,
     *,
@@ -753,10 +751,11 @@ def optimize(
     )
     ast.fix_missing_locations(factory)
     localns: dict = {}
-    exec(compile(factory, "<ast>", "exec"), func.__globals__, localns)  # type: ignore
+    exec(compile(factory, GENERATED_FILENAME, "exec"), func.__globals__, localns)  # type: ignore
     optimized_func = localns["factory"](captured)
-    setattr(optimized_func, METADATA_ATTR, (optimized_ast, optimizer.skip))
     result = functools.wraps(func)(optimized_func)
+    # setattr is done after functools.wraps to prevent overriding of METADATA_ATTR
+    setattr(optimized_func, METADATA_ATTR, (optimized_ast, optimizer.skip))
     if partial_args:
         result = functools.partial(result, *orig_func.args, **orig_func.keywords)
     return cast(Func, result)
