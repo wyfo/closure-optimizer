@@ -270,7 +270,12 @@ def test_inline_local():
 
 
 def test_bool_op():
+    def inlined(x):
+        return x + []
+
     def f(a):
+        print(0 or 0)
+        print(a and inlined(a) and a)
         if a and 0:
             raise
         if not (a or 1):
@@ -282,13 +287,20 @@ def test_bool_op():
         return (0 and a) + (1 and a) + (a and 0) + (0 or a) + (1 or a) + (a or 1)
 
     def g(a):
+        print(0)
+        _1 = a
+        if _1:
+            _2 = a
+            _3 = _2 + []
+            _1 = _3 and a
+        print(_1)
         if (a + 1) and 0:
             raise
         if not (a + 1 or 1):
             raise
-        return 0 + (1 and a) + (a and 0) + (0 or a) + 1 + (a or 1)
+        return 0 + a + (a and 0) + a + 1 + (a or 1)
 
-    assert_optimized(f, g, 0)
+    assert_optimized(optimize(f, inline={inlined}), g, 0)
 
 
 def test_recursive_inlining():

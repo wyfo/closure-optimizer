@@ -368,19 +368,48 @@ class Optimizer(ast.NodeTransformer):
         return self.generic_visit(node)
 
     def visit_BoolOp(self, node: ast.BoolOp) -> NodeTransformation:
-        values = enumerate(node.values.copy())
-        for i, operand in values:
-            node.values[i], value = self._visit_value(operand)
-            if value is not Undefined:
-                if (isinstance(node.op, ast.And) and not value) or (
-                    isinstance(node.op, ast.Or) and value
-                ):
-                    return node.values[i]
-            else:
+        for i, operand in enumerate(node.values[:-1]):
+            operand, value = self._visit_value(operand)
+            if value is Undefined:
                 break
-        for i, operand in values:
-            node.values[i] = self.visit(operand)
-        return self.generic_visit(node)
+            if (isinstance(node.op, ast.And) and not value) or (
+                isinstance(node.op, ast.Or) and value
+            ):
+                return operand
+        else:
+            return self.visit(node.values[-1])
+        intermediates: List[Tuple[ast.expr, List[ast.stmt]]] = [(operand, [])]
+        for operand in node.values[i + 1 :]:
+            inlined_len = len(self._inlined)
+            operand = self.visit(operand)
+            if len(self._inlined) > inlined_len:
+                intermediates.append((operand, self._inlined[inlined_len:]))
+                self._inlined[inlined_len:] = []
+            else:
+                prev, inlined = intermediates[-1]
+                if isinstance(prev, ast.BoolOp) and type(prev.op) == type(node.op):
+                    prev.values.append(operand)
+                else:
+                    intermediates[-1] = (
+                        ast.BoolOp(op=node.op, values=[prev, operand]),
+                        inlined,
+                    )
+        (init, _), *intermediates = intermediates
+        assert not _
+        if not intermediates:
+            return init
+        name = self.name_generator()
+
+        def assign(val: ast.expr) -> List[ast.stmt]:
+            return [ast.Assign(targets=[ast.Name(id=name, ctx=ast.Store())], value=val)]
+
+        self._add_inlined(assign(init))
+        for value, inlined in intermediates:
+            test = ast.Name(id=name, ctx=ast.Load())
+            self._add_inlined(
+                [ast.If(test=test, body=inlined + assign(value), orelse=[])]
+            )
+        return ast.Name(id=name, ctx=ast.Load())
 
     def visit_Call(self, node: ast.Call) -> NodeTransformation:
         for func_id, comp in [("list", ast.ListComp), ("set", ast.SetComp)]:
